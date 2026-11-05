@@ -45,7 +45,6 @@ pub struct SplitRatio {
 impl SplitRatio {
     const HALF: Self = Self { numerator: 1, denominator: 2 };
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     fn from_pixels(first: u32, available: u32) -> Self {
         debug_assert!(first > 0 && first < available);
         let (mut a, mut b) = (first, available);
@@ -99,7 +98,6 @@ pub enum LayoutError {
     TooSmall,
     InvalidMinimum,
     InvalidBounds,
-    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     MissingSplit,
 }
 
@@ -205,7 +203,6 @@ impl Layout {
     }
 
     /// Move the divider to an absolute window-space X/Y, clamped by both subtree minima.
-    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     pub fn drag_split(
         &mut self,
         path: &SplitPath,
@@ -327,7 +324,6 @@ impl Layout {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     fn node_mut(&mut self, path: &[Child]) -> Option<&mut Self> {
         let Some((child, rest)) = path.split_first() else {
             return Some(self);

@@ -13,10 +13,10 @@ use glutin::display::GetGlDisplay;
 use glutin::platform::x11::X11GlConfigExt;
 use log::{error, warn};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{Event as WinitEvent, Modifiers, WindowEvent};
+use winit::event::{ElementState, Event as WinitEvent, Modifiers, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasDisplayHandle;
-use winit::window::WindowId;
+use winit::window::{CursorIcon, WindowId};
 
 use alacritty_terminal::event::{Event as TerminalEvent, Notify};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -26,16 +26,17 @@ use alacritty_terminal::term::{Term, TermMode};
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
-use crate::display::window::Window;
+use crate::display::window::{ImeInhibitor, Window};
 use crate::display::{Display, PaneView};
 use crate::event::{ActionContext, Event, EventProxy, Mouse, TouchPurpose};
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
-use crate::pane::geometry::hit_test;
+use crate::pane::geometry::{PaneRect, hit_test};
 use crate::pane::layout::{Layout, LayoutGeometry, Orientation};
+use crate::pane::pointer::{ButtonAction, PointerState};
 use crate::pane::{Pane, PaneCommand, PaneId, event_target};
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::{input, renderer};
 
 /// Event context for one individual Alacritty window.
@@ -52,6 +53,8 @@ pub struct WindowContext {
     modifiers: Modifiers,
     mouse: Mouse,
     pointer_pane: Option<PaneId>,
+    pointer: PointerState,
+    seed_pointer: bool,
     touch: TouchPurpose,
     occluded: bool,
     preserve_title: bool,
@@ -99,8 +102,9 @@ impl WindowContext {
             },
         };
         if self.focused == pane_id {
-            self.focus_pane(next_focus);
+            self.focus_pane(next_focus, scheduler);
         }
+        self.pointer.drag = None;
         self.panes.remove(&pane_id);
         if self.pointer_pane == Some(pane_id) {
             self.pointer_pane = None;
@@ -132,11 +136,16 @@ impl WindowContext {
         self.dirty = true;
     }
 
-    fn focus_pane(&mut self, id: PaneId) {
+    fn focus_pane(&mut self, id: PaneId, scheduler: &mut Scheduler) {
         if id == self.focused || !self.panes.contains_key(&id) {
             return;
         }
         let previous = self.focused;
+        self.pointer.cancel_gesture();
+        scheduler.unschedule(
+            TimerId::new(Topic::SelectionScrolling, self.id()).with_pane(Some(previous)),
+        );
+
         let old = self.panes.get_mut(&previous).expect("focused pane");
         let native_focused = {
             let mut terminal = old.terminal.lock();
@@ -148,10 +157,17 @@ impl WindowContext {
             focused
         };
         old.view.damage_tracker.frame().mark_fully_damaged();
+        // Composition belongs to the native window and follows its active terminal.
+        let ime = mem::take(&mut old.view.ime);
         let new = self.panes.get_mut(&id).expect("focus target");
+        new.view.ime = ime;
         {
             let mut terminal = new.terminal.lock();
             terminal.is_focused = native_focused;
+            let vi_inhibited = terminal.mode().contains(TermMode::VI)
+                && new.search_state.history_index.is_none()
+                && !new.inline_search_state.char_pending;
+            self.display.window.set_ime_inhibitor(ImeInhibitor::VI, vi_inhibited);
             if native_focused && terminal.mode().contains(TermMode::FOCUS_IN_OUT) {
                 new.notifier.notify(b"\x1b[I".to_vec());
             }
@@ -177,10 +193,15 @@ impl WindowContext {
         self.dirty = true;
     }
 
-    fn apply_pane_command(&mut self, command: PaneCommand, proxy: &EventLoopProxy<Event>) {
+    fn apply_pane_command(
+        &mut self,
+        command: PaneCommand,
+        proxy: &EventLoopProxy<Event>,
+        scheduler: &mut Scheduler,
+    ) {
         match command {
             PaneCommand::Split(orientation) => {
-                if let Err(error) = self.split_pane(orientation, proxy) {
+                if let Err(error) = self.split_pane(orientation, proxy, scheduler) {
                     warn!("Cannot split pane: {error}");
                     self.message_buffer.push(crate::message_bar::Message::new(
                         format!("Cannot split pane: {error}"),
@@ -197,7 +218,7 @@ impl WindowContext {
             },
             PaneCommand::Focus(direction) => {
                 if let Some(id) = self.geometry.neighbor(self.focused, direction) {
-                    self.focus_pane(id);
+                    self.focus_pane(id, scheduler);
                 }
             },
         }
@@ -207,6 +228,7 @@ impl WindowContext {
         &mut self,
         orientation: Orientation,
         proxy: &EventLoopProxy<Event>,
+        scheduler: &mut Scheduler,
     ) -> Result<(), Box<dyn Error>> {
         let id = self.allocate_pane_id();
         // Validate against a candidate tree before starting a shell or running its rc files.
@@ -231,7 +253,7 @@ impl WindowContext {
         pane.terminal.lock().is_focused = false;
         self.layout = candidate;
         self.panes.insert(id, pane);
-        self.focus_pane(id);
+        self.focus_pane(id, scheduler);
         self.refresh_pane_sizes();
         self.display.window.request_redraw();
         Ok(())
@@ -361,6 +383,8 @@ impl WindowContext {
             occluded: Default::default(),
             mouse: Default::default(),
             pointer_pane: None,
+            pointer: PointerState::default(),
+            seed_pointer: false,
             touch: Default::default(),
             dirty: Default::default(),
         };
@@ -546,22 +570,146 @@ impl WindowContext {
         }
     }
 
-    /// Hit-test in window coordinates before giving the input processor local pixels.
-    fn translate_pointer_event(&mut self, event: &mut WinitEvent<Event>) {
-        let position = match event {
+    /// Route window pointer events before acquiring a terminal lock.
+    fn route_pointer_event(
+        &mut self,
+        mut event: WinitEvent<Event>,
+        scheduler: &mut Scheduler,
+    ) -> Option<WinitEvent<Event>> {
+        if let WinitEvent::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. }, ..
+        } = &event
+        {
+            self.pointer.position = (position.x, position.y);
+        }
+        self.pointer_pane = hit_test(
+            self.geometry.panes.iter().map(|(&id, &rect)| (id, rect)),
+            self.pointer.position,
+        );
+        // Window messages remain clickable regardless of focused-pane origin or size.
+        if self.pointer.capture.is_none() && self.pointer.drag.is_none() {
+            if let Some(close) = self.display.message_bar_hit(
+                &self.config,
+                &self.message_buffer,
+                self.pointer.position,
+            ) {
+                match &event {
+                    WinitEvent::WindowEvent { event: WindowEvent::CursorMoved { .. }, .. } => {
+                        self.display.window.set_mouse_cursor(if close {
+                            CursorIcon::Pointer
+                        } else {
+                            CursorIcon::Default
+                        });
+                        return None;
+                    },
+                    WinitEvent::WindowEvent {
+                        event: WindowEvent::MouseInput { button, state: ElementState::Pressed, .. },
+                        ..
+                    } => {
+                        self.pointer.suppress(*button);
+                        if close && *button == MouseButton::Left {
+                            self.message_buffer.pop();
+                            self.refresh_pane_sizes();
+                        }
+                        return None;
+                    },
+                    _ => (),
+                }
+            }
+        }
+        match &mut event {
             WinitEvent::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. }, ..
-            } => position,
-            WinitEvent::WindowEvent { event: WindowEvent::Touch(touch), .. } => &mut touch.location,
-            _ => return,
-        };
-        let window_position = (position.x, position.y);
-        self.pointer_pane =
-            hit_test(self.panes.iter().map(|(&id, pane)| (id, pane.view.rect)), window_position);
-        // Input remains focused-pane scoped; click-to-focus policy comes with split panes.
-        // Keeping out-of-bounds local coordinates preserves selection dragging.
-        let local = self.focused_pane().view.rect.local_position(window_position);
-        *position = PhysicalPosition::new(local.0, local.1);
+            } => {
+                self.pointer.position = (position.x, position.y);
+                self.pointer_pane = hit_test(
+                    self.geometry.panes.iter().map(|(&id, &rect)| (id, rect)),
+                    self.pointer.position,
+                );
+                if let Some(drag) = self.pointer.drag.clone() {
+                    let params = self.valid_layout_params();
+                    match self.layout.drag_split(
+                        &drag.path,
+                        drag.position(self.pointer.position),
+                        params,
+                    ) {
+                        Ok(_) => self.refresh_pane_sizes(),
+                        Err(error) => {
+                            warn!("Cannot drag pane divider: {error:?}");
+                            self.pointer.drag = None;
+                        },
+                    }
+                    self.update_pointer_cursor();
+                    return None;
+                }
+                if self.pointer.capture.is_none() && self.pointer_pane != Some(self.focused) {
+                    self.display.window.set_mouse_cursor(CursorIcon::Text);
+                    self.update_pointer_cursor();
+                    return None;
+                }
+            },
+            WinitEvent::WindowEvent {
+                window_id,
+                event: WindowEvent::MouseInput { device_id, button, state, .. },
+            } => {
+                match self.pointer.button(*button, *state, self.focused, &self.geometry) {
+                    ButtonAction::Forward => (),
+                    ButtonAction::Ignore => {
+                        self.update_pointer_cursor();
+                        return None;
+                    },
+                    ButtonAction::Focus(id) => {
+                        self.focus_pane(id, scheduler);
+                        self.seed_pointer = true;
+                        // Seed the newly focused pane's cell/selection coordinates without
+                        // forwarding either edge of the focus click to its terminal.
+                        event = WinitEvent::WindowEvent {
+                            window_id: *window_id,
+                            event: WindowEvent::CursorMoved {
+                                device_id: *device_id,
+                                position: PhysicalPosition::new(
+                                    self.pointer.position.0,
+                                    self.pointer.position.1,
+                                ),
+                            },
+                        };
+                    },
+                }
+            },
+            WinitEvent::WindowEvent { event: WindowEvent::MouseWheel { .. }, .. }
+                if self.pointer.drag.is_some() || self.pointer_pane != Some(self.focused) =>
+            {
+                return None;
+            },
+            _ => (),
+        }
+        translate_pointer_event(
+            &mut event,
+            self.focused_pane().view.rect,
+            &self.geometry,
+            &mut self.pointer.position,
+            &mut self.pointer_pane,
+        );
+        Some(event)
+    }
+
+    fn update_pointer_cursor(&mut self) {
+        if self.pointer.capture.is_some() {
+            return;
+        }
+        let orientation = self
+            .pointer
+            .drag
+            .as_ref()
+            .map(|drag| drag.orientation)
+            .or_else(|| self.pointer.divider_at(&self.geometry));
+        if let Some(orientation) = orientation {
+            let cursor = match orientation {
+                Orientation::Vertical => CursorIcon::ColResize,
+                Orientation::Horizontal => CursorIcon::RowResize,
+            };
+            self.display.window.set_mouse_cursor(cursor);
+        }
     }
 
     /// Process events for this terminal window.
@@ -583,20 +731,34 @@ impl WindowContext {
 
                 // Continue to process all pending events.
             },
-            mut event => {
-                self.translate_pointer_event(&mut event);
+            event => {
                 self.event_queue.push(event);
                 return;
             },
         }
 
-        while let Some(next) = self.event_queue.first() {
+        while !self.event_queue.is_empty() {
+            let multiple_panes = self.panes.len() > 1;
+            let pointer_routed = (multiple_panes || self.pointer.has_suppressed_buttons())
+                && is_pointer_event(&self.event_queue[0]);
+            if pointer_routed {
+                let event = self.event_queue.remove(0);
+                let Some(event) = self.route_pointer_event(event, scheduler) else { continue };
+                self.event_queue.insert(0, event);
+            }
+            let next = &self.event_queue[0];
             let pane_id = event_target(next, self.focused);
-            let count = self
-                .event_queue
-                .iter()
-                .take_while(|event| event_target(event, self.focused) == pane_id)
-                .count();
+            let count = if pointer_routed {
+                1
+            } else {
+                self.event_queue
+                    .iter()
+                    .take_while(|event| {
+                        event_target(event, self.focused) == pane_id
+                            && !(multiple_panes && is_pointer_event(event))
+                    })
+                    .count()
+            };
             // Borrow fields separately so pane state and the shared display can be mutated
             // together.
             let pane = match self.panes.get_mut(&pane_id) {
@@ -645,10 +807,40 @@ impl WindowContext {
             };
             let mut processor = input::Processor::new(context);
 
-            let remaining = crate::pane::process_batch(self.event_queue.drain(..count), |event| {
-                processor.handle_event(event);
-                !processor.ctx.pane_commands.is_empty()
-            });
+            let rect = processor.ctx.pane_view.rect;
+            let remaining =
+                crate::pane::process_batch(self.event_queue.drain(..count), |mut event| {
+                    if !pointer_routed {
+                        if let WinitEvent::WindowEvent {
+                            event: WindowEvent::MouseInput { button, state, .. },
+                            ..
+                        } = &event
+                        {
+                            self.pointer.button(*button, *state, self.focused, &self.geometry);
+                        }
+                        translate_pointer_event(
+                            &mut event,
+                            rect,
+                            &self.geometry,
+                            &mut self.pointer.position,
+                            &mut self.pointer_pane,
+                        );
+                    }
+                    if std::mem::take(&mut self.seed_pointer) {
+                        if let WinitEvent::WindowEvent {
+                            event: WindowEvent::CursorMoved { position, .. },
+                            ..
+                        } = &event
+                        {
+                            processor.seed_mouse_position(*position);
+                        } else {
+                            processor.handle_event(event);
+                        }
+                    } else {
+                        processor.handle_event(event);
+                    }
+                    !processor.ctx.pane_commands.is_empty()
+                });
             self.event_queue.splice(0..0, remaining);
 
             // Shared font/window changes must reach every pane, not only this batch's target.
@@ -670,8 +862,12 @@ impl WindowContext {
             }
             drop(terminal);
             for command in pane_commands {
-                self.apply_pane_command(command, event_proxy);
+                self.apply_pane_command(command, event_proxy, scheduler);
             }
+        }
+
+        if self.panes.len() > 1 {
+            self.update_pointer_cursor();
         }
 
         // Don't call `request_redraw` when event is `RedrawRequested` since the `dirty` flag
@@ -795,4 +991,35 @@ impl WindowContext {
             }
         }
     }
+}
+
+/// Mouse policy changes can affect subsequent queued pointer events, so split those runs.
+fn is_pointer_event(event: &WinitEvent<Event>) -> bool {
+    matches!(event, WinitEvent::WindowEvent {
+        event: WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::Touch(_),
+        ..
+    })
+}
+
+fn translate_pointer_event(
+    event: &mut WinitEvent<Event>,
+    rect: PaneRect,
+    geometry: &LayoutGeometry,
+    pointer: &mut (f64, f64),
+    pointer_pane: &mut Option<PaneId>,
+) {
+    let position = match event {
+        WinitEvent::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+            position
+        },
+        WinitEvent::WindowEvent { event: WindowEvent::Touch(touch), .. } => &mut touch.location,
+        _ => return,
+    };
+    *pointer = (position.x, position.y);
+    *pointer_pane = hit_test(geometry.panes.iter().map(|(&id, &rect)| (id, rect)), *pointer);
+    let local = rect.local_position(*pointer);
+    *position = PhysicalPosition::new(local.0, local.1);
 }

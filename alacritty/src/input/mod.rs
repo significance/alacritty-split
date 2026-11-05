@@ -467,6 +467,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     #[inline]
     pub fn mouse_moved(&mut self, position: PhysicalPosition<f64>) {
+        self.update_mouse_position(position, true);
+    }
+
+    /// Seed focus-click coordinates without sending synthetic mouse motion to the PTY.
+    pub fn seed_mouse_position(&mut self, position: PhysicalPosition<f64>) {
+        self.update_mouse_position(position, false);
+    }
+
+    fn update_mouse_position(&mut self, position: PhysicalPosition<f64>, report_motion: bool) {
         let size_info = self.ctx.size_info();
 
         let (x, y) = position.into();
@@ -516,7 +525,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode())
         {
             self.ctx.update_selection(point, cell_side);
-        } else if cell_changed
+        } else if report_motion
+            && cell_changed
             && self.ctx.terminal().mode().intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG)
         {
             if lmb_pressed {

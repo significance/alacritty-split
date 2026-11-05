@@ -742,6 +742,28 @@ impl Display {
         self.pending_renderer_update.get_or_insert(Default::default()).resize = true;
     }
 
+    /// Window-level message hit test; true identifies the close button.
+    pub fn message_bar_hit(
+        &self,
+        config: &UiConfig,
+        messages: &MessageBuffer,
+        position: (f64, f64),
+    ) -> Option<bool> {
+        let message = messages.message()?;
+        let padding = config.window.padding(self.window.scale_factor as f32);
+        let mut size = SizeInfo::new(
+            self.window_size.width as f32,
+            self.window_size.height as f32,
+            self.cell_size.0,
+            self.cell_size.1,
+            padding.0,
+            padding.1,
+            config.window.dynamic_padding,
+        );
+        let lines = message.text(&size).len();
+        message_bar_hit(&mut size, lines, position)
+    }
+
     /// Shared layout inputs, including the space occupied by the window message bar.
     pub fn layout_params(&self, config: &UiConfig, messages: &MessageBuffer) -> LayoutParams {
         let padding = config.window.padding(self.window.scale_factor as f32);
@@ -1056,7 +1078,7 @@ impl Display {
         };
 
         // Handle IME.
-        if view.ime.is_enabled() {
+        if focused && view.ime.is_enabled() {
             if let Some(point) = ime_position {
                 let (fg, bg) = if search_state.regex().is_some() {
                     (config.colors.footer_bar_foreground(), config.colors.footer_bar_background())
@@ -1304,7 +1326,7 @@ impl Display {
             Some(preedit) => preedit,
             None => {
                 // In case we don't have preedit, just set the popup point.
-                self.window.update_ime_position(point, &view.size_info);
+                self.window.update_ime_position(point, &view.size_info, view.rect);
                 return;
             },
         };
@@ -1378,7 +1400,7 @@ impl Display {
             _ => end,
         };
 
-        self.window.update_ime_position(ime_popup_point, &view.size_info);
+        self.window.update_ime_position(ime_popup_point, &view.size_info, view.rect);
     }
 
     /// Format search regex to account for the cursor and fullwidth characters.
@@ -1801,6 +1823,29 @@ fn window_size(
     PhysicalSize::new(width as u32, height as u32)
 }
 
+/// Hit-test the same window grid used to draw messages, including padded bottom space.
+fn message_bar_hit(size: &mut SizeInfo, lines: usize, position: (f64, f64)) -> Option<bool> {
+    if lines == 0
+        || position.0 < 0.
+        || position.0 >= f64::from(size.width())
+        || position.1 < 0.
+        || position.1 >= f64::from(size.height())
+    {
+        return None;
+    }
+    size.reserve_lines(lines);
+    let top = f64::from(size.padding_y() + size.screen_lines() as f32 * size.cell_height());
+    let button_left = f64::from(
+        size.padding_x()
+            + size.columns().saturating_sub(crate::message_bar::CLOSE_BUTTON_TEXT.len()) as f32
+                * size.cell_width(),
+    );
+    if position.1 < top {
+        return None;
+    }
+    Some(position.1 < top + f64::from(size.cell_height()) && position.0 >= button_left)
+}
+
 /// Convert shared physical metrics to integer layout bounds and minimum pane sizes.
 fn layout_params(
     window: PhysicalSize<u32>,
@@ -1832,6 +1877,17 @@ mod pane_size_tests {
 
     fn view(width: u32, height: u32, config: &UiConfig) -> PaneView {
         PaneView::new(SizeInfo::new(width as f32, height as f32, 8., 16., 0., 0., false), config)
+    }
+
+    #[test]
+    fn window_message_hit_test_is_independent_of_pane_origin() {
+        let size = SizeInfo::new(800., 600., 8., 16., 4., 4., false);
+        assert_eq!(message_bar_hit(&mut { size }, 2, (772., 564.)), Some(true));
+        assert_eq!(message_bar_hit(&mut { size }, 2, (771., 564.)), Some(false));
+        assert_eq!(message_bar_hit(&mut { size }, 2, (772., 580.)), Some(false));
+        assert_eq!(message_bar_hit(&mut { size }, 2, (772., 563.)), None);
+        assert_eq!(message_bar_hit(&mut { size }, 0, (772., 564.)), None);
+        assert_eq!(message_bar_hit(&mut { size }, 2, (800., 564.)), None);
     }
 
     #[test]

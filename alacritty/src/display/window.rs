@@ -45,6 +45,7 @@ use crate::cli::WindowOptions;
 use crate::config::UiConfig;
 use crate::config::window::{Decorations, Identity, WindowConfig};
 use crate::display::SizeInfo;
+use crate::pane::geometry::PaneRect;
 
 /// Window icon for `_NET_WM_ICON` property.
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
@@ -451,13 +452,8 @@ impl Window {
     }
 
     /// Adjust the IME editor position according to the new location of the cursor.
-    pub fn update_ime_position(&self, point: Point<usize>, size: &SizeInfo) {
-        // NOTE: X11 doesn't support cursor area, so we need to offset manually to not obscure
-        // the text.
-        let offset = if self.is_x11 { 1 } else { 0 };
-        let nspot_x = f64::from(size.padding_x() + point.column.0 as f32 * size.cell_width());
-        let nspot_y =
-            f64::from(size.padding_y() + (point.line + offset) as f32 * size.cell_height());
+    pub fn update_ime_position(&self, point: Point<usize>, size: &SizeInfo, rect: PaneRect) {
+        let position = ime_cursor_position(point, size, rect, self.is_x11);
 
         // NOTE: some compositors don't like excluding too much and try to render popup at the
         // bottom right corner of the provided area, so exclude just the full-width char to not
@@ -465,10 +461,7 @@ impl Window {
         let width = size.cell_width() as f64 * 2.;
         let height = size.cell_height as f64;
 
-        self.window.set_ime_cursor_area(
-            PhysicalPosition::new(nspot_x, nspot_y),
-            PhysicalSize::new(width, height),
-        );
+        self.window.set_ime_cursor_area(position, PhysicalSize::new(width, height));
     }
 
     /// Disable macOS window shadows.
@@ -538,4 +531,46 @@ fn use_srgb_color_space(window: &WinitWindow) {
     };
 
     view.window().unwrap().setColorSpace(Some(&NSColorSpace::sRGBColorSpace()));
+}
+
+/// Translate a pane-local IME cursor to native window coordinates.
+fn ime_cursor_position(
+    point: Point<usize>,
+    size: &SizeInfo,
+    rect: PaneRect,
+    is_x11: bool,
+) -> PhysicalPosition<f64> {
+    // X11 does not support cursor area: move down one cell to avoid obscuring text.
+    let offset = usize::from(is_x11);
+    PhysicalPosition::new(
+        f64::from(rect.x) + f64::from(size.padding_x() + point.column.0 as f32 * size.cell_width()),
+        f64::from(rect.y)
+            + f64::from(size.padding_y() + (point.line + offset) as f32 * size.cell_height()),
+    )
+}
+
+#[cfg(test)]
+mod ime_tests {
+    use super::*;
+    use alacritty_terminal::index::Column;
+
+    #[test]
+    fn ime_cursor_uses_pane_origin_padding_and_x11_offset() {
+        let size = SizeInfo::new(400., 200., 8., 16., 4., 6., false);
+        let rect = PaneRect { x: 402, y: 202, width: 400, height: 200 };
+        let point = Point::new(3, Column(5));
+        assert_eq!(
+            ime_cursor_position(point, &size, rect, false),
+            PhysicalPosition::new(446., 256.)
+        );
+        assert_eq!(
+            ime_cursor_position(point, &size, rect, true),
+            PhysicalPosition::new(446., 272.)
+        );
+        let origin = PaneRect { x: 0, y: 0, ..rect };
+        assert_eq!(
+            ime_cursor_position(point, &size, origin, false),
+            PhysicalPosition::new(44., 54.)
+        );
+    }
 }

@@ -620,6 +620,10 @@ A new shell inherits the focused pane's foreground process working directory whe
 available, falling back to *general.working_directory*. If the window is too small
 for another pane, the split is rejected without starting a shell.
 
+Click an unfocused pane to focus it; that click is consumed. Later clicks use
+normal selection or terminal mouse reporting. Drag dividers to resize panes.
+Mouse wheels over inactive panes or dividers are ignored until the pane is focused.
+
 # SEE ALSO
 
 *alacritty*(1), *alacritty-msg*(1), *alacritty*(5), *alacritty-escapes*(7)

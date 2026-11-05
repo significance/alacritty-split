@@ -2,6 +2,7 @@
 
 pub mod geometry;
 pub mod layout;
+pub mod pointer;
 
 use std::error::Error;
 use std::fs::File;
