@@ -46,6 +46,18 @@ impl PaneRect {
     }
 }
 
+/// Window-space decorations consumed by the renderer; true marks focused-pane edges.
+pub fn decorations(
+    dividers: impl IntoIterator<Item = PaneRect>,
+    focused: PaneRect,
+    thickness: u32,
+) -> impl Iterator<Item = (PaneRect, bool)> {
+    dividers
+        .into_iter()
+        .map(|rect| (rect, false))
+        .chain(focused.edges(thickness).map(|rect| (rect, true)))
+}
+
 /// Find the pane under a window-space pointer without treating dividers as content.
 pub fn hit_test(
     panes: impl IntoIterator<Item = (PaneId, PaneRect)>,
@@ -57,6 +69,38 @@ pub fn hit_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_pane_decorations_preserve_dividers_and_keep_focus_inside_its_pane() {
+        use crate::pane::layout::{Layout, LayoutParams, MinSize, Orientation};
+        let params = LayoutParams {
+            bounds: PaneRect { x: 0, y: 0, width: 300, height: 200 },
+            divider: 2,
+            minimum: MinSize { width: 2, height: 2 },
+        };
+        let mut layout = Layout::Leaf(PaneId(0));
+        layout.split(PaneId(0), PaneId(1), Orientation::Vertical, params).unwrap();
+        let geometry = layout.split(PaneId(1), PaneId(2), Orientation::Horizontal, params).unwrap();
+        let focused = geometry.panes[&PaneId(1)];
+        let dividers: Vec<_> = geometry.dividers.iter().map(|divider| divider.rect).collect();
+        let output: Vec<_> = decorations(dividers.iter().copied(), focused, 2).collect();
+        assert_eq!(dividers, vec![PaneRect { x: 149, y: 0, width: 2, height: 200 }, PaneRect {
+            x: 151,
+            y: 99,
+            width: 149,
+            height: 2
+        },]);
+        assert_eq!(output[..2], [(dividers[0], false), (dividers[1], false)]);
+        assert_eq!(output.len(), 6);
+        for (edge, is_focus) in &output[2..] {
+            assert!(is_focus);
+            assert!(edge.x >= focused.x && edge.y >= focused.y);
+            assert!(edge.x + edge.width <= focused.x + focused.width);
+            assert!(edge.y + edge.height <= focused.y + focused.height);
+            assert!(edge.x + edge.width <= params.bounds.width);
+            assert!(edge.y + edge.height <= params.bounds.height);
+        }
+    }
 
     #[test]
     fn focus_edges_stay_inside_panes_including_tiny_bounds() {

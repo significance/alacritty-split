@@ -52,7 +52,7 @@ use crate::display::meter::Meter;
 use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{Message, MessageBuffer, MessageType};
-use crate::pane::geometry::PaneRect;
+use crate::pane::geometry::{PaneRect, decorations};
 use crate::pane::layout::{LayoutParams, MinSize};
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::{self, GlyphCache, Renderer, platform};
@@ -349,6 +349,7 @@ pub struct Display {
 
     /// Shared font metrics; every pane uses the same cell dimensions.
     cell_size: (f32, f32),
+    minimum_window_size: Option<PhysicalSize<u32>>,
 
     pub raw_window_handle: RawWindowHandle,
 
@@ -593,6 +594,7 @@ impl Display {
                 window,
                 window_size: viewport_size,
                 cell_size: (cell_width, cell_height),
+                minimum_window_size: None,
                 pending_renderer_update: Default::default(),
                 pending_update: Default::default(),
                 meter: Default::default(),
@@ -715,7 +717,6 @@ impl Display {
         }
         if let Some(dimensions) = pending_update.dimensions() {
             if dimensions != self.window_size {
-                self.pending_renderer_update.get_or_insert(Default::default()).resize = true;
                 self.window_size = dimensions;
             }
         }
@@ -724,6 +725,19 @@ impl Display {
                 .set_resize_increments(PhysicalSize::new(self.cell_size.0, self.cell_size.1));
         }
         invalidate
+    }
+
+    /// Avoid repeated native size-hint updates. Single-pane windows have no minimum.
+    pub fn set_minimum_window_size(&mut self, size: Option<PhysicalSize<u32>>) {
+        if self.minimum_window_size != size {
+            self.window.set_min_inner_size(size);
+            self.minimum_window_size = size;
+        }
+    }
+
+    /// Virtual pane geometry can stay unchanged while the native surface shrinks.
+    pub fn resize_clipped_surface(&mut self) {
+        self.pending_renderer_update.get_or_insert(Default::default()).resize = true;
     }
 
     /// Shared layout inputs, including the space occupied by the window message bar.
@@ -739,7 +753,8 @@ impl Display {
             config.window.dynamic_padding,
         );
         let lines = messages.message().map_or(0, |message| message.text(&size).len());
-        layout_params(self.window_size, self.cell_size, padding, lines)
+        let divider = (self.window.scale_factor as f32).round().max(1.) as u32;
+        layout_params(self.window_size, self.cell_size, padding, lines, divider)
     }
 
     /// Apply the shared metrics and each pane's own rectangle/search state to its PTY.
@@ -759,15 +774,12 @@ impl Display {
             message_buffer,
             search_state,
         );
-        // PTY pixel metrics can change even when the grid dimensions stay the same.
-        if new_size != view.size_info {
-            pty_resize_handle.on_resize(new_size.into());
-        }
-
-        // Resize the terminal when its grid dimensions have changed.
+        // Preserve upstream notification frequency: notify only on grid changes.
         if view.size_info.screen_lines() != new_size.screen_lines
             || view.size_info.columns() != new_size.columns()
         {
+            pty_resize_handle.on_resize(new_size.into());
+
             // Resize terminal.
             terminal.resize(new_size);
 
@@ -839,6 +851,7 @@ impl Display {
         mut terminal: MutexGuard<'_, Term<T>>,
         config: &UiConfig,
         search_state: &mut SearchState,
+        focused: bool,
     ) {
         // Collect renderable content before the terminal is dropped.
         let mut content = RenderableContent::new(config, view, &terminal, search_state);
@@ -908,7 +921,8 @@ impl Display {
 
         // Draw grid.
         {
-            let _sampler = self.meter.sampler();
+            // The diagnostic measures the focused pane once per frame.
+            let _sampler = focused.then(|| self.meter.sampler());
 
             // Ensure macOS hasn't reset our viewport.
             #[cfg(target_os = "macos")]
@@ -1031,10 +1045,12 @@ impl Display {
             &metrics,
             rects,
         );
-        self.draw_render_timer(view, config);
+        if focused {
+            self.draw_render_timer(view, config);
+        }
 
         // Draw hyperlink uri preview.
-        if has_highlighted_hint {
+        if focused && has_highlighted_hint {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
             self.draw_hyperlink_preview(view, config, cursor_point, display_offset);
         }
@@ -1105,10 +1121,16 @@ impl Display {
             false,
         );
         let color = config.colors.primary.foreground;
-        let rects = dividers
-            .into_iter()
-            .chain(focused.edges(1))
-            .map(|rect| {
+        let bg = config.colors.primary.background;
+        let muted = Rgb::new(
+            ((u16::from(color.r) + 3 * u16::from(bg.r)) / 4) as u8,
+            ((u16::from(color.g) + 3 * u16::from(bg.g)) / 4) as u8,
+            ((u16::from(color.b) + 3 * u16::from(bg.b)) / 4) as u8,
+        );
+        let thickness = (self.window.scale_factor as f32).round().max(1.) as u32;
+        let rects = decorations(dividers, focused, thickness)
+            .map(|(rect, is_focused)| {
+                let color = if is_focused { color } else { muted };
                 RenderRect::new(
                     rect.x as f32,
                     rect.y as f32,
@@ -1756,7 +1778,9 @@ fn layout_params(
     cell: (f32, f32),
     padding: (f32, f32),
     message_lines: usize,
+    divider: u32,
 ) -> LayoutParams {
+    // Glyph cell heights are whole physical pixels; subtracting lines preserves padding.
     let message_height = (message_lines as f32 * cell.1).ceil() as u32;
     LayoutParams {
         bounds: PaneRect {
@@ -1765,10 +1789,10 @@ fn layout_params(
             width: window.width,
             height: window.height.saturating_sub(message_height),
         },
-        divider: 1,
+        divider,
         minimum: MinSize {
-            width: (MIN_COLUMNS as f32 * cell.0 + 2. * padding.0).ceil() as u32,
-            height: (MIN_SCREEN_LINES as f32 * cell.1 + 2. * padding.1).ceil() as u32,
+            width: ((MIN_COLUMNS as f32 * cell.0 + 2. * padding.0).ceil() as u32).max(1),
+            height: ((MIN_SCREEN_LINES as f32 * cell.1 + 2. * padding.1).ceil() as u32).max(1),
         },
     }
 }
@@ -1783,13 +1807,16 @@ mod pane_size_tests {
 
     #[test]
     fn layout_reserves_messages_and_rounds_minimum_up() {
-        let params = layout_params(PhysicalSize::new(800, 600), (8.5, 16.), (2.25, 3.), 2);
+        let params = layout_params(PhysicalSize::new(800, 600), (8.5, 16.), (2.25, 3.), 2, 2);
         assert_eq!(params.bounds.height, 568);
+        assert_eq!(params.divider, 2);
         assert_eq!(params.bounds.width, 800);
         assert_eq!(params.minimum.width, (MIN_COLUMNS as f32 * 8.5 + 4.5).ceil() as u32);
         assert_eq!(params.minimum.height, MIN_SCREEN_LINES as u32 * 16 + 6);
-        let tiny = layout_params(PhysicalSize::new(1, 1), (8., 16.), (0., 0.), 10);
+        let tiny = layout_params(PhysicalSize::new(1, 1), (8., 16.), (0., 0.), 10, 1);
         assert_eq!(tiny.bounds.height, 0);
+        let zero = layout_params(PhysicalSize::new(0, 0), (0., 0.), (0., 0.), 0, 1);
+        assert_eq!(zero.minimum, MinSize { width: 1, height: 1 });
     }
 
     #[test]
@@ -1810,6 +1837,7 @@ mod pane_size_tests {
                 (8., 16.),
                 config.window.padding(1.),
                 lines,
+                1,
             );
             let resized = view(params.bounds.width, params.bounds.height, &config);
             let new =

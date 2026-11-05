@@ -11,6 +11,7 @@ use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
 use glutin::platform::x11::X11GlConfigExt;
+use log::warn;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{Event as WinitEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -32,7 +33,7 @@ use crate::event::{ActionContext, Event, EventProxy, Mouse, TouchPurpose};
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
 use crate::pane::geometry::hit_test;
-use crate::pane::layout::Layout;
+use crate::pane::layout::{Layout, LayoutGeometry};
 use crate::pane::{Pane, PaneId, event_target};
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
@@ -46,6 +47,7 @@ pub struct WindowContext {
     panes: BTreeMap<PaneId, Pane>,
     focused: PaneId,
     layout: Layout,
+    geometry: LayoutGeometry,
     next_pane_id: u64,
     modifiers: Modifiers,
     mouse: Mouse,
@@ -207,6 +209,10 @@ impl WindowContext {
             panes: Default::default(),
             focused,
             layout: Layout::Leaf(focused),
+            geometry: LayoutGeometry {
+                panes: [(focused, pane_view.rect)].into(),
+                dividers: Vec::new(),
+            },
             next_pane_id: 0,
             display,
             config,
@@ -361,7 +367,7 @@ impl WindowContext {
         let focused = self.panes.get_mut(&self.focused).expect("focused pane");
         self.display.process_renderer_update(&mut focused.view);
         let context_reset = self.display.begin_frame(&self.config);
-        for pane in self.panes.values_mut() {
+        for (&id, pane) in &mut self.panes {
             if context_reset {
                 pane.view.damage_tracker.frame().mark_fully_damaged();
             }
@@ -373,17 +379,18 @@ impl WindowContext {
                 }
             }
             let terminal = pane.terminal.lock();
-            self.display.draw(&mut pane.view, terminal, &self.config, &mut pane.search_state);
+            self.display.draw(
+                &mut pane.view,
+                terminal,
+                &self.config,
+                &mut pane.search_state,
+                id == self.focused,
+            );
         }
         let multiple_panes = self.panes.len() > 1;
         if multiple_panes {
-            let mut params = self.display.layout_params(&self.config, &self.message_buffer);
-            let minimum = self.layout.minimum(params).expect("valid layout minimum");
-            params.bounds.width = params.bounds.width.max(minimum.width);
-            params.bounds.height = params.bounds.height.max(minimum.height);
-            let geometry = self.layout.geometry(params).expect("minimum-sized layout");
             self.display.draw_pane_edges(
-                geometry.dividers.into_iter().map(|divider| divider.rect),
+                self.geometry.dividers.iter().map(|divider| divider.rect),
                 self.panes[&self.focused].view.rect,
                 &self.config,
             );
@@ -548,6 +555,42 @@ impl WindowContext {
         }
     }
 
+    /// Compute geometry once per update; rendering consumes the stored result.
+    fn update_geometry(&mut self) {
+        let mut params = self.display.layout_params(&self.config, &self.message_buffer);
+        if self.panes.len() == 1 {
+            // Preserve the upstream ability to shrink a single pane below its grid minimum.
+            self.display.set_minimum_window_size(None);
+            self.geometry = LayoutGeometry {
+                panes: [(self.focused, params.bounds)].into(),
+                dividers: Vec::new(),
+            };
+            return;
+        }
+        let minimum = match self.layout.minimum(params) {
+            Ok(minimum) => minimum,
+            Err(error) => {
+                warn!("Cannot compute pane layout minimum: {error:?}");
+                return;
+            },
+        };
+        let message_height = self.display.window_size.height - params.bounds.height;
+        self.display.set_minimum_window_size(Some(PhysicalSize::new(
+            minimum.width,
+            minimum.height.saturating_add(message_height),
+        )));
+        let clipped = params.bounds.width < minimum.width || params.bounds.height < minimum.height;
+        params.bounds.width = params.bounds.width.max(minimum.width);
+        params.bounds.height = params.bounds.height.max(minimum.height);
+        match self.layout.geometry(params) {
+            Ok(geometry) => self.geometry = geometry,
+            Err(error) => warn!("Cannot update pane geometry: {error:?}"),
+        }
+        if clipped {
+            self.display.resize_clipped_surface();
+        }
+    }
+
     /// Apply a window update once, then resize every terminal using its own state.
     fn submit_display_update(
         &mut self,
@@ -556,20 +599,9 @@ impl WindowContext {
         event_terminal: &mut Term<EventProxy>,
     ) {
         let invalidate = self.display.handle_update(&self.config);
-        let mut params = self.display.layout_params(&self.config, &self.message_buffer);
-        let minimum = self.layout.minimum(params).expect("valid layout minimum");
-        let message_height = self.display.window_size.height - params.bounds.height;
-        self.display.window.set_min_inner_size(PhysicalSize::new(
-            minimum.width,
-            minimum.height.saturating_add(message_height),
-        ));
-        // Some compositors can temporarily deliver dimensions below the requested minimum.
-        // Keep a valid virtual layout; scissoring clips it to the actual native surface.
-        params.bounds.width = params.bounds.width.max(minimum.width);
-        params.bounds.height = params.bounds.height.max(minimum.height);
-        let geometry = self.layout.geometry(params).expect("minimum-sized layout");
+        self.update_geometry();
         for (&id, pane) in &mut self.panes {
-            pane.view.rect = geometry.panes[&id];
+            pane.view.rect = self.geometry.panes[&id];
             if invalidate {
                 pane.view.damage_tracker.frame().mark_fully_damaged();
             }
