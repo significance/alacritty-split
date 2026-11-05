@@ -60,7 +60,7 @@ use crate::display::{Display, PaneView, Preedit, SizeInfo};
 use crate::input::{self, ActionContext as _, FONT_SIZE_STEP};
 use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
 use crate::message_bar::{Message, MessageBuffer};
-use crate::pane::PaneId;
+use crate::pane::{PaneCommand, PaneId};
 #[cfg(unix)]
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
@@ -685,6 +685,9 @@ impl Default for InlineSearchState {
 
 pub struct ActionContext<'a, N, T> {
     pub pane_id: PaneId,
+    pub pane_commands: &'a mut Vec<PaneCommand>,
+    pub pane_title: &'a mut Option<String>,
+    pub is_active_pane: bool,
     pub notifier: &'a mut N,
     pub terminal: &'a mut Term<T>,
     pub clipboard: &'a mut Clipboard,
@@ -714,6 +717,10 @@ pub struct ActionContext<'a, N, T> {
 
 impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionContext<'a, N, T> {
     #[inline]
+    fn pane_command(&mut self, command: PaneCommand) {
+        self.pane_commands.push(command);
+    }
+
     fn write_to_pty<B: Into<Cow<'static, [u8]>>>(&self, val: B) {
         self.notifier.notify(val);
     }
@@ -1906,13 +1913,21 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 },
                 EventType::Terminal(event) => match event {
                     TerminalEvent::Title(title) => {
-                        if !self.ctx.preserve_title && self.ctx.config.window.dynamic_title {
+                        *self.ctx.pane_title = Some(title.clone());
+                        if self.ctx.is_active_pane
+                            && !self.ctx.preserve_title
+                            && self.ctx.config.window.dynamic_title
+                        {
                             self.ctx.window().set_title(title);
                         }
                     },
                     TerminalEvent::ResetTitle => {
+                        *self.ctx.pane_title = None;
                         let window_config = &self.ctx.config.window;
-                        if !self.ctx.preserve_title && window_config.dynamic_title {
+                        if self.ctx.is_active_pane
+                            && !self.ctx.preserve_title
+                            && window_config.dynamic_title
+                        {
                             self.ctx.display.window.set_title(window_config.identity.title.clone());
                         }
                     },
@@ -1940,12 +1955,12 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         }
                     },
                     TerminalEvent::ClipboardStore(clipboard_type, content) => {
-                        if self.ctx.terminal.is_focused {
+                        if self.ctx.is_active_pane && self.ctx.terminal.is_focused {
                             self.ctx.clipboard.store(clipboard_type, content);
                         }
                     },
                     TerminalEvent::ClipboardLoad(clipboard_type, format) => {
-                        if self.ctx.terminal.is_focused {
+                        if self.ctx.is_active_pane && self.ctx.terminal.is_focused {
                             let text = format(self.ctx.clipboard.load(clipboard_type).as_str());
                             self.ctx.write_to_pty(text.into_bytes());
                         }
@@ -1964,7 +1979,10 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.write_to_pty(text.into_bytes());
                     },
                     TerminalEvent::PtyWrite(text) => self.ctx.write_to_pty(text.into_bytes()),
-                    TerminalEvent::MouseCursorDirty => self.reset_mouse_cursor(),
+                    TerminalEvent::MouseCursorDirty if self.ctx.is_active_pane => {
+                        self.reset_mouse_cursor()
+                    },
+                    TerminalEvent::MouseCursorDirty => (),
                     TerminalEvent::CursorBlinkingChange => self.ctx.update_cursor_blinking(),
                     TerminalEvent::Exit | TerminalEvent::ChildExit(_) | TerminalEvent::Wakeup => (),
                 },

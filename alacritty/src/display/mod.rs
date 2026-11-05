@@ -663,6 +663,8 @@ impl Display {
     }
 
     fn swap_buffers(&self, view: &mut PaneView, full_damage: bool) {
+        #[cfg(any(target_os = "macos", windows))]
+        let _ = (view, full_damage);
         #[allow(clippy::single_match)]
         let res = match (self.surface.deref(), &self.context.deref()) {
             #[cfg(not(any(target_os = "macos", windows)))]
@@ -755,6 +757,33 @@ impl Display {
         let lines = messages.message().map_or(0, |message| message.text(&size).len());
         let divider = (self.window.scale_factor as f32).round().max(1.) as u32;
         layout_params(self.window_size, self.cell_size, padding, lines, divider)
+    }
+
+    /// Construct a new terminal at its final rectangle before spawning its PTY.
+    pub fn pane_view_for_rect(&self, rect: PaneRect, config: &UiConfig) -> PaneView {
+        let mut view = PaneView::new(
+            SizeInfo::new(
+                rect.width as f32,
+                rect.height as f32,
+                self.cell_size.0,
+                self.cell_size.1,
+                0.,
+                0.,
+                false,
+            ),
+            config,
+        );
+        view.rect = rect;
+        let size = view.size_for_rect(
+            self.cell_size,
+            config,
+            self.window.scale_factor as f32,
+            &MessageBuffer::default(),
+            &SearchState::default(),
+        );
+        view.size_info = size;
+        view.damage_tracker.resize(size.screen_lines(), size.columns());
+        view
     }
 
     /// Apply the shared metrics and each pane's own rectangle/search state to its PTY.

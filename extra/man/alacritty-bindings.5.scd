@@ -521,7 +521,7 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 |  _"W"_
 :  _"Command"_
 :[
-:  _"Quit"_
+:  _"ClosePane"_
 |  _"N"_
 :  _"Command"_
 :[
@@ -594,6 +594,31 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 :  _"Command"_
 :[
 :  _"SelectLastTab"_
+
+# NATIVE PANE ACTIONS
+
+*SplitVertical* creates side-by-side panes, opening a new shell to the right.
+*SplitHorizontal* creates stacked panes, opening a new shell below. Each pane has
+independent terminal contents and scrollback. Splits may be nested.
+
+On macOS, *Command+D* runs *SplitVertical*, *Command+Shift+D* runs
+*SplitHorizontal*, and *Command+W* runs *ClosePane*. Closing the last pane closes
+the window. *Command+Option+Left/Right/Up/Down* runs the corresponding
+*FocusPaneLeft*, *FocusPaneRight*, *FocusPaneUp*, or *FocusPaneDown* action.
+
+All pane actions can be bound on any platform. For example:
+
+```
+[keyboard]
+bindings = [
+    { key = "D", mods = "Control|Shift", action = "SplitVertical" },
+    { key = "E", mods = "Control|Shift", action = "SplitHorizontal" },
+]
+```
+
+A new shell inherits the focused pane's foreground process working directory when
+available, falling back to *general.working_directory*. If the window is too small
+for another pane, the split is rejected without starting a shell.
 
 # SEE ALSO
 

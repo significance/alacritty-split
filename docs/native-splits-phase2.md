@@ -44,22 +44,70 @@ not represent total multi-pane frame time. Keeping the preview in that pane's dr
 preserves its clipping, cursor-relative placement and captured terminal state without
 holding a terminal lock through presentation. No terminal is re-locked for these overlays.
 
+## 2.3 Actions, lifecycle and focus
+
+The actions SplitVertical, SplitHorizontal, ClosePane and FocusPaneLeft/Right/Up/Down
+are bindable on every platform. macOS defaults are Cmd+D (new pane right), Cmd+Shift+D
+(new pane below), Cmd+W (close focused pane), and Cmd+Option+arrows (directional focus).
+The macOS pane binding table is constructed explicitly in tests.
+
+A candidate tree validates the split before spawning a shell. New PTYs start at their
+final pane size and inherit foreground-process CWD when available, falling back to the
+configured directory. Spawn failure leaves the original tree unchanged. Exiting panes
+collapse their tree parent and resize all survivors. Invalid geometry cannot strand a
+dead pane: removal has a geometry-independent recovery, with a final rebuild preserving
+all surviving terminal identities. Returning to one pane clears the cached native minimum.
+Closing the final pane preserves the old explicit-quit/hold behavior.
+
+Input processing keeps each pane's contiguous event batch under one terminal lock,
+stopping at a pane command. Unprocessed events return to the queue in order. Window
+commands run after locks drop, so subsequent keyboard events target the resulting focus.
+
+Focus transitions update mode 1004 notifications, terminal focus flags, title, pointer
+state and cursor blinking. Background panes retain their own title and visual bell;
+clipboard access and hint updates are restricted to the focused pane. Native window
+focus changes continue to target only that pane.
+
+Mouse click-to-focus, divider dragging and pane-relative IME placement remain Phase 3.
+
 ## Validation
 
-Formatting and Clippy pass on nightly-2026-04-01. The workspace has 310 passing tests
-(124 app, 1 config, 7 derive, 132 terminal, 45 reference, 1 doctest).
-Linux X11-only and Wayland-only builds are checked. No GUI validation or native
-macOS/Windows compilation. No new platform-specific lines: the shared minimum-size
+Formatting and Clippy pass on nightly-2026-04-01. The workspace has 315 passing tests
+(129 app, 1 config, 7 derive, 132 terminal, 45 reference, 1 doctest).
+Linux X11-only and Wayland-only builds are checked. A real X11/Xvfb smoke test
+with software GL passed: three independent shells, vertical then nested horizontal
+split, directional keyboard focus, input routing by shell PID, CWD inheritance,
+explicit pane close, shell exit, survivor resizing and final window close (exit 0).
+Initial new-shell grids were 32x50 and 16x50; the last survivor returned to 32x100.
+Artifacts: /tmp/alacritty-split-smoke-j2mww13x; harness: /tmp/split-gui-smoke.py.
+This exercised custom Linux bindings for the same actions, not native Mac keystrokes.
+No pixel/visual inspection is claimed.
+
+Claude independently verified the earlier 1c901b1e checkpoint on macOS: release
+build and 310 tests pass, window dimensions and reference outputs match upstream,
+and hold/IPC behavior passes. The new action stage has not yet been compiled on
+macOS/Windows. Claude found two conditional unused arguments in swap_buffers; these
+are now explicitly consumed under the macOS/Windows cfg. Their reported pre-existing
+macOS collapsible_match lint remains untouched. New macOS-only lines append the tested pane binding table to the platform defaults
+and replace the prior Cmd+W quit binding. The shared pane-command code and Unix CWD
+lookup are compiled on Linux; the macOS caller and Windows fallback are uncompiled.
+For the earlier sizing/rendering changes, no new platform-specific lines: the shared minimum-size
 wrapper, renderer changes and existing macOS viewport/Windows swap paths remain
 uncompiled on those platforms. The existing Wayland conditional also checks whether
 full damage is required.
 
 ## Mac checks pending
 
+- Run cargo clippy --all-targets on macOS (including the conditional swap-argument fix).
 - Check unchanged single-pane text placement, padding, search and message bars.
 - Check a single pane can shrink below its grid minimum as before.
 - Resize below the split minimum and change font size/DPI; check shell resize behavior.
 - Check nested pane text, selection, visual bell and search clipping.
 - Check one presentation per frame, focused border and divider alignment at Retina scale.
 - Check window messages render once across the full width, including over splits.
-- Check Cmd+D and Cmd+Shift+D once actions are connected.
+- Cmd+D: independent shell opens on the right; Cmd+Shift+D: independent shell below.
+- Nest splits, then use Cmd+Option+arrows to move focus and verify the focused border.
+- Cmd+W closes only the focused pane; shell exit collapses its split and resizes survivors.
+- Check last-pane close and shell exit with and without --hold.
+- Check CWD inheritance, failed split in a tiny window and failed PTY creation.
+- Check title, OSC 52 clipboard isolation, focus reporting and blink behavior across panes.

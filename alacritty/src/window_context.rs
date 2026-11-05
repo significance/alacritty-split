@@ -11,14 +11,14 @@ use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
 use glutin::platform::x11::X11GlConfigExt;
-use log::warn;
+use log::{error, warn};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{Event as WinitEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::WindowId;
 
-use alacritty_terminal::event::Event as TerminalEvent;
+use alacritty_terminal::event::{Event as TerminalEvent, Notify};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Direction;
 use alacritty_terminal::term::{Term, TermMode};
@@ -33,8 +33,8 @@ use crate::event::{ActionContext, Event, EventProxy, Mouse, TouchPurpose};
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
 use crate::pane::geometry::hit_test;
-use crate::pane::layout::{Layout, LayoutGeometry};
-use crate::pane::{Pane, PaneId, event_target};
+use crate::pane::layout::{Layout, LayoutGeometry, Orientation};
+use crate::pane::{Pane, PaneCommand, PaneId, event_target};
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
 
@@ -80,6 +80,27 @@ impl WindowContext {
             // Retain the terminal for --hold and reference-test serialization.
             return !self.display.window.hold;
         }
+        let params = self.valid_layout_params();
+        let next_focus = match self.layout.remove(pane_id, params) {
+            Ok(id) => id,
+            Err(error) => {
+                error!("Cannot remove exited pane with geometry: {error:?}; recovering tree");
+                match self.layout.discard(pane_id) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        // Recover even a corrupt tree using every surviving terminal.
+                        error!("Cannot discard exited pane: {error:?}; rebuilding layout");
+                        let survivors: Vec<_> =
+                            self.panes.keys().copied().filter(|id| *id != pane_id).collect();
+                        self.layout = Layout::from_panes(&survivors);
+                        survivors[0]
+                    },
+                }
+            },
+        };
+        if self.focused == pane_id {
+            self.focus_pane(next_focus);
+        }
         self.panes.remove(&pane_id);
         if self.pointer_pane == Some(pane_id) {
             self.pointer_pane = None;
@@ -88,15 +109,132 @@ impl WindowContext {
         self.event_queue.retain(|event| {
             !matches!(event, WinitEvent::UserEvent(event) if event.pane_id == Some(pane_id))
         });
-        if self.focused == pane_id {
-            // Pointer/gesture state belongs to the previously focused terminal.
-            self.mouse = Mouse::default();
-            self.touch = TouchPurpose::default();
-            self.focused = *self.panes.first_key_value().expect("surviving pane").0;
-        }
+        self.refresh_pane_sizes();
         self.dirty = true;
         self.display.window.request_redraw();
         false
+    }
+
+    fn valid_layout_params(&self) -> crate::pane::layout::LayoutParams {
+        let mut params = self.display.layout_params(&self.config, &self.message_buffer);
+        if let Ok(minimum) = self.layout.minimum(params) {
+            params.bounds.width = params.bounds.width.max(minimum.width);
+            params.bounds.height = params.bounds.height.max(minimum.height);
+        }
+        params
+    }
+
+    fn refresh_pane_sizes(&mut self) {
+        let terminal = Arc::clone(&self.focused_pane().terminal);
+        let mut terminal = terminal.lock();
+        let searching = self.focused_pane().search_state.history_index.is_some();
+        self.submit_display_update(self.focused, searching, &mut terminal);
+        self.dirty = true;
+    }
+
+    fn focus_pane(&mut self, id: PaneId) {
+        if id == self.focused || !self.panes.contains_key(&id) {
+            return;
+        }
+        let previous = self.focused;
+        let old = self.panes.get_mut(&previous).expect("focused pane");
+        let native_focused = {
+            let mut terminal = old.terminal.lock();
+            let focused = terminal.is_focused;
+            if focused && terminal.mode().contains(TermMode::FOCUS_IN_OUT) {
+                old.notifier.notify(b"\x1b[O".to_vec());
+            }
+            terminal.is_focused = false;
+            focused
+        };
+        old.view.damage_tracker.frame().mark_fully_damaged();
+        let new = self.panes.get_mut(&id).expect("focus target");
+        {
+            let mut terminal = new.terminal.lock();
+            terminal.is_focused = native_focused;
+            if native_focused && terminal.mode().contains(TermMode::FOCUS_IN_OUT) {
+                new.notifier.notify(b"\x1b[I".to_vec());
+            }
+        }
+        new.view.damage_tracker.frame().mark_fully_damaged();
+        new.cursor_blink_timed_out = false;
+        new.view.cursor_hidden = false;
+        if !self.preserve_title && self.config.window.dynamic_title {
+            let title =
+                new.title.clone().unwrap_or_else(|| self.config.window.identity.title.clone());
+            self.display.window.set_title(title);
+        }
+        self.focused = id;
+        self.mouse = Mouse::default();
+        self.touch = TouchPurpose::default();
+        for pane_id in [previous, id] {
+            self.event_queue.push(
+                Event::new(TerminalEvent::CursorBlinkingChange.into(), self.id())
+                    .with_pane(Some(pane_id))
+                    .into(),
+            );
+        }
+        self.dirty = true;
+    }
+
+    fn apply_pane_command(&mut self, command: PaneCommand, proxy: &EventLoopProxy<Event>) {
+        match command {
+            PaneCommand::Split(orientation) => {
+                if let Err(error) = self.split_pane(orientation, proxy) {
+                    warn!("Cannot split pane: {error}");
+                    self.message_buffer.push(crate::message_bar::Message::new(
+                        format!("Cannot split pane: {error}"),
+                        crate::message_bar::MessageType::Warning,
+                    ));
+                    self.refresh_pane_sizes();
+                }
+            },
+            PaneCommand::Close => {
+                if self.panes.len() == 1 {
+                    self.display.window.hold = false;
+                }
+                self.focused_pane().terminal.lock().exit();
+            },
+            PaneCommand::Focus(direction) => {
+                if let Some(id) = self.geometry.neighbor(self.focused, direction) {
+                    self.focus_pane(id);
+                }
+            },
+        }
+    }
+
+    fn split_pane(
+        &mut self,
+        orientation: Orientation,
+        proxy: &EventLoopProxy<Event>,
+    ) -> Result<(), Box<dyn Error>> {
+        let id = self.allocate_pane_id();
+        // Validate against a candidate tree before starting a shell or running its rc files.
+        let params = self.display.layout_params(&self.config, &self.message_buffer);
+        let mut candidate = self.layout.clone();
+        let geometry = candidate
+            .split(self.focused, id, orientation, params)
+            .map_err(|error| format!("{error:?}"))?;
+        let mut options = WindowOptions::default();
+        #[cfg(not(windows))]
+        {
+            let focused = self.focused_pane();
+            options.terminal_options.working_directory =
+                crate::daemon::foreground_process_path(focused.master_fd, focused.shell_pid).ok();
+        }
+        if options.terminal_options.working_directory.is_none() {
+            options.terminal_options.working_directory =
+                self.config.general.working_directory.clone();
+        }
+        let view = self.display.pane_view_for_rect(geometry.panes[&id], &self.config);
+        let pane = Pane::new(id, &self.config, &options, view, self.id(), proxy.clone())?;
+        pane.terminal.lock().is_focused = false;
+        self.layout = candidate;
+        self.panes.insert(id, pane);
+        self.focus_pane(id);
+        self.refresh_pane_sizes();
+        self.display.window.request_redraw();
+        Ok(())
     }
 
     /// Create initial window context that does bootstrapping the graphics API we're going to use.
@@ -473,8 +611,12 @@ impl WindowContext {
 
             let old_is_searching = pane.search_state.history_index.is_some();
 
+            let mut pane_commands = Vec::new();
             let context = ActionContext {
                 pane_id,
+                pane_commands: &mut pane_commands,
+                pane_title: &mut pane.title,
+                is_active_pane: pane_id == self.focused,
                 cursor_blink_timed_out: &mut pane.cursor_blink_timed_out,
                 prev_bell_cmd: &mut pane.prev_bell_cmd,
                 message_buffer: &mut self.message_buffer,
@@ -503,9 +645,11 @@ impl WindowContext {
             };
             let mut processor = input::Processor::new(context);
 
-            for event in self.event_queue.drain(..count) {
+            let remaining = crate::pane::process_batch(self.event_queue.drain(..count), |event| {
                 processor.handle_event(event);
-            }
+                !processor.ctx.pane_commands.is_empty()
+            });
+            self.event_queue.splice(0..0, remaining);
 
             // Shared font/window changes must reach every pane, not only this batch's target.
             if self.display.pending_update.dirty {
@@ -514,7 +658,7 @@ impl WindowContext {
             }
 
             let pane = self.panes.get_mut(&pane_id).expect("event pane");
-            if self.dirty || self.mouse.hint_highlight_dirty {
+            if pane_id == self.focused && (self.dirty || self.mouse.hint_highlight_dirty) {
                 self.dirty |= self.display.update_highlighted_hints(
                     &mut pane.view,
                     &terminal,
@@ -523,6 +667,10 @@ impl WindowContext {
                     self.modifiers.state(),
                 );
                 self.mouse.hint_highlight_dirty = false;
+            }
+            drop(terminal);
+            for command in pane_commands {
+                self.apply_pane_command(command, event_proxy);
             }
         }
 

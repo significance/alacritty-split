@@ -172,6 +172,18 @@ pub enum Action {
     /// Minimize the Alacritty window.
     Minimize,
 
+    /// Split the focused pane with a vertical divider.
+    SplitVertical,
+    /// Split the focused pane with a horizontal divider.
+    SplitHorizontal,
+    /// Close the focused pane.
+    ClosePane,
+    /// Focus a neighboring pane.
+    FocusPaneLeft,
+    FocusPaneRight,
+    FocusPaneUp,
+    FocusPaneDown,
+
     /// Quit Alacritty.
     Quit,
 
@@ -578,7 +590,7 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
 
 #[cfg(all(target_os = "macos", not(test)))]
 pub fn platform_key_bindings() -> Vec<KeyBinding> {
-    bindings!(
+    let mut bindings = bindings!(
         KeyBinding;
         Insert, ModifiersState::SHIFT, ~BindingMode::VI, ~BindingMode::SEARCH; Action::Esc("\x1b[2;2~".into());
         // Tabbing api.
@@ -612,11 +624,27 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
         "h",    ModifiersState::SUPER   | ModifiersState::ALT;                 Action::HideOtherApplications;
         "m",    ModifiersState::SUPER;                                         Action::Minimize;
         "q",    ModifiersState::SUPER;                                         Action::Quit;
-        "w",    ModifiersState::SUPER;                                         Action::Quit;
         "f",    ModifiersState::SUPER, ~BindingMode::SEARCH;                   Action::SearchForward;
         "b",    ModifiersState::SUPER, ~BindingMode::SEARCH;                   Action::SearchBackward;
         "+" => KeyLocation::Numpad, ModifiersState::SUPER;                     Action::IncreaseFontSize;
         "-" => KeyLocation::Numpad, ModifiersState::SUPER;                     Action::DecreaseFontSize;
+    );
+    bindings.extend(pane_key_bindings());
+    bindings
+}
+
+/// Keep this table available to tests even when platform defaults are disabled.
+#[cfg(any(target_os = "macos", test))]
+fn pane_key_bindings() -> Vec<KeyBinding> {
+    bindings!(
+        KeyBinding;
+        "w", ModifiersState::SUPER; Action::ClosePane;
+        "d", ModifiersState::SUPER; Action::SplitVertical;
+        "d", ModifiersState::SUPER | ModifiersState::SHIFT; Action::SplitHorizontal;
+        ArrowLeft, ModifiersState::SUPER | ModifiersState::ALT; Action::FocusPaneLeft;
+        ArrowRight, ModifiersState::SUPER | ModifiersState::ALT; Action::FocusPaneRight;
+        ArrowUp, ModifiersState::SUPER | ModifiersState::ALT; Action::FocusPaneUp;
+        ArrowDown, ModifiersState::SUPER | ModifiersState::ALT; Action::FocusPaneDown;
     )
 }
 
@@ -1247,6 +1275,64 @@ impl<'a> de::Deserialize<'a> for ModsWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_pane_bindings_match_requested_shortcuts() {
+        let bindings = pane_key_bindings();
+        let expected = [
+            (Key::Character("w".into()), ModifiersState::SUPER, Action::ClosePane),
+            (Key::Character("d".into()), ModifiersState::SUPER, Action::SplitVertical),
+            (
+                Key::Character("d".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT,
+                Action::SplitHorizontal,
+            ),
+            (
+                Key::Named(NamedKey::ArrowLeft),
+                ModifiersState::SUPER | ModifiersState::ALT,
+                Action::FocusPaneLeft,
+            ),
+            (
+                Key::Named(NamedKey::ArrowRight),
+                ModifiersState::SUPER | ModifiersState::ALT,
+                Action::FocusPaneRight,
+            ),
+            (
+                Key::Named(NamedKey::ArrowUp),
+                ModifiersState::SUPER | ModifiersState::ALT,
+                Action::FocusPaneUp,
+            ),
+            (
+                Key::Named(NamedKey::ArrowDown),
+                ModifiersState::SUPER | ModifiersState::ALT,
+                Action::FocusPaneDown,
+            ),
+        ];
+        assert_eq!(bindings.len(), expected.len());
+        for (binding, (key, mods, action)) in bindings.iter().zip(expected) {
+            assert_eq!(binding.trigger, BindingKey::Keycode { key, location: KeyLocation::Any });
+            assert_eq!(binding.mods, mods);
+            assert_eq!(binding.action, action);
+            assert!(binding.mode.is_empty() && binding.notmode.is_empty());
+        }
+    }
+
+    #[test]
+    fn pane_actions_are_bindable_on_all_platforms() {
+        for name in [
+            "SplitVertical",
+            "SplitHorizontal",
+            "ClosePane",
+            "FocusPaneLeft",
+            "FocusPaneRight",
+            "FocusPaneUp",
+            "FocusPaneDown",
+        ] {
+            let value = format!("key = \"d\"\naction = \"{name}\"");
+            let binding: KeyBinding = toml::from_str(&value).unwrap();
+            assert!(!matches!(binding.action, Action::None));
+        }
+    }
 
     use winit::keyboard::ModifiersState;
 

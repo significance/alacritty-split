@@ -8,14 +8,12 @@ use super::geometry::PaneRect;
 
 /// Vertical dividers create side-by-side panes; horizontal dividers create stacked panes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
 pub enum Orientation {
     Vertical,
     Horizontal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
 pub enum FocusDirection {
     Left,
     Right,
@@ -45,10 +43,9 @@ pub struct SplitRatio {
 }
 
 impl SplitRatio {
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     const HALF: Self = Self { numerator: 1, denominator: 2 };
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     fn from_pixels(first: u32, available: u32) -> Self {
         debug_assert!(first > 0 && first < available);
         let (mut a, mut b) = (first, available);
@@ -66,13 +63,7 @@ impl SplitRatio {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Layout {
     Leaf(PaneId),
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
-    Split {
-        orientation: Orientation,
-        ratio: SplitRatio,
-        first: Box<Layout>,
-        second: Box<Layout>,
-    },
+    Split { orientation: Orientation, ratio: SplitRatio, first: Box<Layout>, second: Box<Layout> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,19 +93,45 @@ pub struct LayoutGeometry {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutError {
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     MissingPane(PaneId),
     DuplicatePane(PaneId),
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     LastPane,
     TooSmall,
     InvalidMinimum,
     InvalidBounds,
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     MissingSplit,
 }
 
 impl Layout {
+    /// Rebuild a fallback tree while retaining every surviving terminal identity.
+    pub fn from_panes(panes: &[PaneId]) -> Self {
+        assert!(!panes.is_empty());
+        let mut tree = Self::Leaf(panes[0]);
+        for &id in &panes[1..] {
+            tree = Self::Split {
+                orientation: Orientation::Vertical,
+                ratio: SplitRatio::HALF,
+                first: Box::new(tree),
+                second: Box::new(Self::Leaf(id)),
+            };
+        }
+        tree
+    }
+
+    /// Remove a dead leaf even if current physical geometry cannot be computed.
+    pub fn discard(&mut self, pane: PaneId) -> Result<PaneId, LayoutError> {
+        if let Self::Leaf(id) = self {
+            return Err(if *id == pane {
+                LayoutError::LastPane
+            } else {
+                LayoutError::MissingPane(pane)
+            });
+        }
+        let siblings = self.remove_leaf(pane).ok_or(LayoutError::MissingPane(pane))?;
+        Ok(siblings[0])
+    }
+
     /// Compute a resize without mutating weights, even when the window is too small.
     pub fn geometry(&self, params: LayoutParams) -> Result<LayoutGeometry, LayoutError> {
         let bounds = params.bounds;
@@ -136,7 +153,6 @@ impl Layout {
     }
 
     /// Replace only the target leaf with a half split, committing only after validation.
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     pub fn split(
         &mut self,
         pane: PaneId,
@@ -168,7 +184,6 @@ impl Layout {
     }
 
     /// Collapse the removed pane's parent; focus the nearest leaf in its sibling subtree.
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     pub fn remove(&mut self, pane: PaneId, params: LayoutParams) -> Result<PaneId, LayoutError> {
         let geometry = self.geometry(params)?;
         let closed = *geometry.panes.get(&pane).ok_or(LayoutError::MissingPane(pane))?;
@@ -190,7 +205,7 @@ impl Layout {
     }
 
     /// Move the divider to an absolute window-space X/Y, clamped by both subtree minima.
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     pub fn drag_split(
         &mut self,
         path: &SplitPath,
@@ -302,7 +317,6 @@ impl Layout {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     fn leaf_mut(&mut self, pane: PaneId) -> Option<&mut Self> {
         match self {
             Self::Leaf(id) if *id == pane => Some(self),
@@ -313,7 +327,7 @@ impl Layout {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "connected by divider dragging in Phase 3"))]
     fn node_mut(&mut self, path: &[Child]) -> Option<&mut Self> {
         let Some((child, rest)) = path.split_first() else {
             return Some(self);
@@ -325,7 +339,6 @@ impl Layout {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     fn leaf_ids(&self, ids: &mut Vec<PaneId>) {
         match self {
             Self::Leaf(id) => ids.push(*id),
@@ -336,7 +349,6 @@ impl Layout {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     fn remove_leaf(&mut self, pane: PaneId) -> Option<Vec<PaneId>> {
         if let Self::Split { first, second, .. } = self {
             let sibling = if **first == Self::Leaf(pane) {
@@ -382,7 +394,6 @@ fn combined_minimum(
 impl LayoutGeometry {
     /// Prefer overlapping edges, then axis gap and alignment with the focused pane's center.
     /// Equal geometry is resolved by overlap, center distance and finally lowest PaneId.
-    #[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
     pub fn neighbor(&self, pane: PaneId, direction: FocusDirection) -> Option<PaneId> {
         let from = *self.panes.get(&pane)?;
         self.panes
@@ -422,17 +433,14 @@ impl LayoutGeometry {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
 fn x_interval(rect: PaneRect) -> (u64, u64) {
     (u64::from(rect.x), u64::from(rect.x) + u64::from(rect.width))
 }
 
-#[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
 fn y_interval(rect: PaneRect) -> (u64, u64) {
     (u64::from(rect.y), u64::from(rect.y) + u64::from(rect.height))
 }
 
-#[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
 fn center_distance(a: PaneRect, b: PaneRect) -> u128 {
     let dx =
         (u64::from(a.x) * 2 + u64::from(a.width)).abs_diff(u64::from(b.x) * 2 + u64::from(b.width));
@@ -441,7 +449,6 @@ fn center_distance(a: PaneRect, b: PaneRect) -> u128 {
     u128::from(dx).pow(2) + u128::from(dy).pow(2)
 }
 
-#[cfg_attr(not(test), allow(dead_code, reason = "wired by the next pane actions checkpoint"))]
 fn rect_distance(a: PaneRect, b: PaneRect) -> u128 {
     let gap = |a: (u64, u64), b: (u64, u64)| a.0.saturating_sub(b.1).max(b.0.saturating_sub(a.1));
     u128::from(gap(x_interval(a), x_interval(b))).pow(2)
@@ -508,6 +515,29 @@ mod tests {
         }
         // In-bounds disjoint integer rectangles with exactly the window's area prove full cover.
         assert_eq!(area, u128::from(bounds.width) * u128::from(bounds.height));
+    }
+
+    #[test]
+    fn middle_exit_preserves_partition_and_focus_even_with_invalid_resize_geometry() {
+        let p = params(300, 200);
+        let mut tree = Layout::Leaf(PaneId(0));
+        split(&mut tree, 0, 1, Orientation::Vertical, p);
+        split(&mut tree, 1, 2, Orientation::Horizontal, p);
+        assert_eq!(tree.remove(PaneId(1), p), Ok(PaneId(2)));
+        let geometry = tree.geometry(p).unwrap();
+        assert_partition(&geometry, p);
+        assert_eq!(geometry.neighbor(PaneId(2), FocusDirection::Left), Some(PaneId(0)));
+        let invalid = params(0, 0);
+        assert_eq!(tree.remove(PaneId(2), invalid), Err(LayoutError::TooSmall));
+        assert_eq!(tree.discard(PaneId(2)), Ok(PaneId(0)));
+        assert_partition(&tree.geometry(p).unwrap(), p);
+        let rebuilt = Layout::from_panes(&[PaneId(2), PaneId(5), PaneId(9)]);
+        assert_partition(&rebuilt.geometry(p).unwrap(), p);
+        assert_eq!(rebuilt.geometry(p).unwrap().panes.keys().copied().collect::<Vec<_>>(), [
+            PaneId(2),
+            PaneId(5),
+            PaneId(9)
+        ]);
     }
 
     #[test]

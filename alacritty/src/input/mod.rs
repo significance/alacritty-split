@@ -48,7 +48,8 @@ use crate::event::{
     ClickState, Event, EventType, InlineSearchState, Mouse, TouchPurpose, TouchZoom,
 };
 use crate::message_bar::{self, Message};
-use crate::pane::PaneId;
+use crate::pane::layout::{FocusDirection, Orientation};
+use crate::pane::{PaneCommand, PaneId};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 
 pub mod keyboard;
@@ -102,6 +103,7 @@ pub trait ActionContext<T: EventListener> {
     fn pane_view(&mut self) -> &mut PaneView;
     fn terminal(&self) -> &Term<T>;
     fn terminal_mut(&mut self) -> &mut Term<T>;
+    fn pane_command(&mut self, _command: PaneCommand) {}
     fn spawn_new_instance(&mut self) {}
     #[cfg(target_os = "macos")]
     fn create_new_window(&mut self, _tabbing_id: Option<String>) {}
@@ -347,6 +349,15 @@ impl<T: EventListener> Execute<T> for Action {
             #[cfg(not(target_os = "macos"))]
             Action::Hide => ctx.window().set_visible(false),
             Action::Minimize => ctx.window().set_minimized(true),
+            Action::SplitVertical => ctx.pane_command(PaneCommand::Split(Orientation::Vertical)),
+            Action::SplitHorizontal => {
+                ctx.pane_command(PaneCommand::Split(Orientation::Horizontal))
+            },
+            Action::ClosePane => ctx.pane_command(PaneCommand::Close),
+            Action::FocusPaneLeft => ctx.pane_command(PaneCommand::Focus(FocusDirection::Left)),
+            Action::FocusPaneRight => ctx.pane_command(PaneCommand::Focus(FocusDirection::Right)),
+            Action::FocusPaneUp => ctx.pane_command(PaneCommand::Focus(FocusDirection::Up)),
+            Action::FocusPaneDown => ctx.pane_command(PaneCommand::Focus(FocusDirection::Down)),
             Action::Quit => {
                 ctx.window().hold = false;
                 ctx.terminal_mut().exit();
@@ -1182,10 +1193,15 @@ mod tests {
         pub message_buffer: &'a mut MessageBuffer,
         pub modifiers: Modifiers,
         config: &'a UiConfig,
+        pane_commands: Vec<PaneCommand>,
         inline_search_state: &'a mut InlineSearchState,
     }
 
     impl<T: EventListener> super::ActionContext<T> for ActionContext<'_, T> {
+        fn pane_command(&mut self, command: PaneCommand) {
+            self.pane_commands.push(command);
+        }
+
         fn search_next(
             &mut self,
             _origin: Point,
@@ -1288,6 +1304,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pane_actions_enqueue_window_commands() {
+        let cfg = UiConfig::default();
+        let size = SizeInfo::new(800., 600., 8., 16., 0., 0., false);
+        let mut terminal = Term::new(cfg.term_options(), &size, MockEventProxy);
+        let mut mouse = Mouse::default();
+        let mut clipboard = Clipboard::new_nop();
+        let mut messages = MessageBuffer::default();
+        let mut inline = InlineSearchState::default();
+        let mut context = ActionContext {
+            terminal: &mut terminal,
+            size_info: &size,
+            mouse: &mut mouse,
+            clipboard: &mut clipboard,
+            message_buffer: &mut messages,
+            modifiers: Modifiers::default(),
+            config: &cfg,
+            inline_search_state: &mut inline,
+            pane_commands: Vec::new(),
+        };
+        let cases = [
+            (Action::SplitVertical, PaneCommand::Split(Orientation::Vertical)),
+            (Action::SplitHorizontal, PaneCommand::Split(Orientation::Horizontal)),
+            (Action::ClosePane, PaneCommand::Close),
+            (Action::FocusPaneLeft, PaneCommand::Focus(FocusDirection::Left)),
+            (Action::FocusPaneRight, PaneCommand::Focus(FocusDirection::Right)),
+            (Action::FocusPaneUp, PaneCommand::Focus(FocusDirection::Up)),
+            (Action::FocusPaneDown, PaneCommand::Focus(FocusDirection::Down)),
+        ];
+        for (action, command) in cases {
+            action.execute(&mut context);
+            assert_eq!(context.pane_commands.pop(), Some(command));
+            assert!(context.pane_commands.is_empty());
+        }
+    }
+
     macro_rules! test_clickstate {
         {
             name: $name:ident,
@@ -1331,6 +1383,7 @@ mod tests {
                     modifiers: Default::default(),
                     message_buffer: &mut message_buffer,
                     inline_search_state: &mut inline_search_state,
+                    pane_commands: Vec::new(),
                     config: &cfg,
                 };
 

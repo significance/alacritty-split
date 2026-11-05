@@ -35,9 +35,32 @@ use crate::event::{Event, EventProxy, InlineSearchState, SearchState};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PaneId(pub u64);
 
+/// Window mutations are deferred until the input processor releases terminal locks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneCommand {
+    Split(layout::Orientation),
+    Close,
+    Focus(layout::FocusDirection),
+}
+
+/// Process a pane's event run until a window mutation is requested; preserve the rest.
+pub fn process_batch<E>(
+    events: impl IntoIterator<Item = E>,
+    mut handle: impl FnMut(E) -> bool,
+) -> Vec<E> {
+    let mut events = events.into_iter();
+    for event in events.by_ref() {
+        if handle(event) {
+            break;
+        }
+    }
+    events.collect()
+}
+
 /// A terminal and its independent PTY session.
 pub struct Pane {
     pub view: PaneView,
+    pub title: Option<String>,
     pub terminal: Arc<FairMutex<Term<EventProxy>>>,
     pub notifier: Notifier,
     pub cursor_blink_timed_out: bool,
@@ -115,6 +138,7 @@ impl Pane {
 
         Ok(Self {
             view,
+            title: None,
             terminal,
             notifier: Notifier(loop_tx),
             cursor_blink_timed_out: Default::default(),
@@ -192,5 +216,23 @@ mod tests {
             event: winit::event::WindowEvent::Focused(true),
         };
         assert_eq!(event_target(&input, PaneId(9)), PaneId(9));
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::process_batch;
+
+    #[test]
+    fn command_stops_run_without_consuming_following_keyboard_events() {
+        let mut handled = Vec::new();
+        let remaining = process_batch([1, 2, 3, 4], |event| {
+            handled.push(event);
+            event == 2
+        });
+        assert_eq!(handled, [1, 2]);
+        assert_eq!(remaining, [3, 4]);
+        assert!(process_batch(remaining, |_| false).is_empty());
+        assert_eq!(process_batch([1, 2], |_| true), [2]);
     }
 }
