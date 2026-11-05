@@ -3,12 +3,16 @@
 pub mod geometry;
 
 use std::error::Error;
+use std::fs::File;
+use std::io::Write;
 #[cfg(not(windows))]
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use log::info;
+use serde_json as json;
 use winit::event::Event as WinitEvent;
 use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
@@ -18,6 +22,7 @@ use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
+use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::tty;
 
 use crate::cli::WindowOptions;
@@ -120,6 +125,26 @@ impl Pane {
             #[cfg(not(windows))]
             shell_pid,
         })
+    }
+
+    /// Write this terminal's grid and dimensions for the existing reference-test harness.
+    pub fn write_ref_test_results(&self, directory: &Path) {
+        let mut grid = self.terminal.lock().grid().clone();
+        grid.initialize_all();
+        grid.truncate();
+        let serialized_grid = json::to_string(&grid).expect("serialize grid");
+        let size = TermSize::new(self.view.size_info.columns(), self.view.size_info.screen_lines());
+        let serialized_size = json::to_string(&size).expect("serialize size");
+        let serialized_config = format!("{{\"history_size\":{}}}", grid.history_size());
+        for (name, contents) in [
+            ("grid.json", serialized_grid),
+            ("size.json", serialized_size),
+            ("config.json", serialized_config),
+        ] {
+            File::create(directory.join(name))
+                .and_then(|mut file| file.write_all(contents.as_bytes()))
+                .expect("write pane ref test");
+        }
     }
 }
 

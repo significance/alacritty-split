@@ -2,9 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::fs::File;
-use std::io::Write;
 use std::mem;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -12,7 +11,6 @@ use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
 use glutin::platform::x11::X11GlConfigExt;
-use serde_json as json;
 use winit::dpi::PhysicalPosition;
 use winit::event::{Event as WinitEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -22,7 +20,6 @@ use winit::window::WindowId;
 use alacritty_terminal::event::Event as TerminalEvent;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Direction;
-use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Term, TermMode};
 
 use crate::cli::{ParsedOptions, WindowOptions};
@@ -247,8 +244,11 @@ impl WindowContext {
         // Apply ipc config if there are overrides.
         self.config = self.window_config.override_config_rc(self.config.clone());
 
-        self.panes.get_mut(&self.focused).expect("focused pane").view.update_config(&self.config);
-        self.focused_pane().terminal.lock().set_options(self.config.term_options());
+        for pane in self.panes.values_mut() {
+            pane.view.update_config(&self.config);
+            pane.terminal.lock().set_options(self.config.term_options());
+            pane.view.hint_state.update_alphabet(self.config.hints.alphabet());
+        }
 
         // Reload cursor if its thickness has changed.
         if (old_config.cursor.thickness() - self.config.cursor.thickness()).abs() > f32::EPSILON {
@@ -305,17 +305,12 @@ impl WindowContext {
         self.display.window.set_transparent(!opaque);
         self.display.window.set_blur(self.config.window.blur);
 
-        // Update hint keys.
-        self.panes
-            .get_mut(&self.focused)
-            .expect("focused pane")
-            .view
-            .hint_state
-            .update_alphabet(self.config.hints.alphabet());
-
-        // Update cursor blinking.
-        let event = Event::new(TerminalEvent::CursorBlinkingChange.into(), None);
-        self.event_queue.push(event.into());
+        // Blink events carry the same identity as PTY-originated events.
+        for &id in self.panes.keys() {
+            let event = Event::new(TerminalEvent::CursorBlinkingChange.into(), self.id())
+                .with_pane(Some(id));
+            self.event_queue.push(event.into());
+        }
 
         self.dirty = true;
     }
@@ -491,19 +486,13 @@ impl WindowContext {
                 processor.handle_event(event);
             }
 
-            // Process DisplayUpdate events.
+            // Shared font/window changes must reach every pane, not only this batch's target.
             if self.display.pending_update.dirty {
-                Self::submit_display_update(
-                    &mut terminal,
-                    &mut self.display,
-                    pane,
-                    &self.message_buffer,
-                    old_is_searching,
-                    &self.config,
-                );
+                self.submit_display_update(pane_id, old_is_searching, &mut terminal);
                 self.dirty = true;
             }
 
+            let pane = self.panes.get_mut(&pane_id).expect("event pane");
             if self.dirty || self.mouse.hint_highlight_dirty {
                 self.dirty |= self.display.update_highlighted_hints(
                     &mut pane.view,
@@ -532,69 +521,76 @@ impl WindowContext {
         self.display.window.id()
     }
 
-    /// Write the ref test results to the disk.
+    /// Preserve original single-pane output paths; give additional panes distinct directories.
     pub fn write_ref_test_results(&self) {
-        // Dump grid state.
-        let mut grid = self.focused_pane().terminal.lock().grid().clone();
-        grid.initialize_all();
-        grid.truncate();
-
-        let serialized_grid = json::to_string(&grid).expect("serialize grid");
-
-        let size_info = &self.focused_pane().view.size_info;
-        let size = TermSize::new(size_info.columns(), size_info.screen_lines());
-        let serialized_size = json::to_string(&size).expect("serialize size");
-
-        let serialized_config = format!("{{\"history_size\":{}}}", grid.history_size());
-
-        File::create("./grid.json")
-            .and_then(|mut f| f.write_all(serialized_grid.as_bytes()))
-            .expect("write grid.json");
-
-        File::create("./size.json")
-            .and_then(|mut f| f.write_all(serialized_size.as_bytes()))
-            .expect("write size.json");
-
-        File::create("./config.json")
-            .and_then(|mut f| f.write_all(serialized_config.as_bytes()))
-            .expect("write config.json");
+        for (&id, pane) in &self.panes {
+            if self.panes.len() == 1 {
+                pane.write_ref_test_results(Path::new("."));
+            } else {
+                let directory = format!("pane-{}", id.0);
+                std::fs::create_dir_all(&directory).expect("create pane ref-test directory");
+                pane.write_ref_test_results(Path::new(&directory));
+            }
+        }
     }
 
-    /// Submit the pending changes to the `Display`.
+    /// Apply a window update once, then resize every terminal using its own state.
     fn submit_display_update(
-        terminal: &mut Term<EventProxy>,
-        display: &mut Display,
-        pane: &mut Pane,
-        message_buffer: &MessageBuffer,
+        &mut self,
+        event_pane: PaneId,
         old_is_searching: bool,
-        config: &UiConfig,
+        event_terminal: &mut Term<EventProxy>,
     ) {
-        // Compute cursor positions before resize.
-        let num_lines = terminal.screen_lines();
-        let cursor_at_bottom = terminal.grid().cursor.point.line + 1 == num_lines;
-        let origin_at_bottom = if terminal.mode().contains(TermMode::VI) {
-            terminal.vi_mode_cursor.point.line == num_lines - 1
-        } else {
-            pane.search_state.direction == Direction::Left
-        };
+        let invalidate = self.display.handle_update(&self.config);
+        let single_pane = self.panes.len() == 1;
+        for (&id, pane) in &mut self.panes {
+            // Phase 0 has one full-window pane. The layout tree will supply bounds in Phase 2.
+            if single_pane {
+                pane.view.rect.width = self.display.window_size.width;
+                pane.view.rect.height = self.display.window_size.height;
+            }
+            if invalidate {
+                pane.view.damage_tracker.frame().mark_fully_damaged();
+            }
+            // Keep the input batch's guard held through resize and hint refresh. Other PTYs
+            // can be locked independently; no PTY thread ever locks another terminal.
+            let background = Arc::clone(&pane.terminal);
+            let mut background_terminal;
+            let terminal = if id == event_pane {
+                &mut *event_terminal
+            } else {
+                background_terminal = background.lock();
+                &mut *background_terminal
+            };
+            let was_searching = if id == event_pane {
+                old_is_searching
+            } else {
+                pane.search_state.history_index.is_some()
+            };
+            let num_lines = terminal.screen_lines();
+            let cursor_at_bottom = terminal.grid().cursor.point.line + 1 == num_lines;
+            let origin_at_bottom = if terminal.mode().contains(TermMode::VI) {
+                terminal.vi_mode_cursor.point.line == num_lines - 1
+            } else {
+                pane.search_state.direction == Direction::Left
+            };
 
-        display.handle_update(
-            &mut pane.view,
-            terminal,
-            &mut pane.notifier,
-            message_buffer,
-            &mut pane.search_state,
-            config,
-        );
+            self.display.resize_pane(
+                &mut pane.view,
+                terminal,
+                &mut pane.notifier,
+                &self.message_buffer,
+                &mut pane.search_state,
+                &self.config,
+            );
 
-        let new_is_searching = pane.search_state.history_index.is_some();
-        if !old_is_searching && new_is_searching {
-            // Scroll on search start to make sure origin is visible with minimal viewport motion.
-            let display_offset = terminal.grid().display_offset();
-            if display_offset == 0 && cursor_at_bottom && !origin_at_bottom {
-                terminal.scroll_display(Scroll::Delta(1));
-            } else if display_offset != 0 && origin_at_bottom {
-                terminal.scroll_display(Scroll::Delta(-1));
+            if !was_searching && pane.search_state.history_index.is_some() {
+                let display_offset = terminal.grid().display_offset();
+                if display_offset == 0 && cursor_at_bottom && !origin_at_bottom {
+                    terminal.scroll_display(Scroll::Delta(1));
+                } else if display_offset != 0 && origin_at_bottom {
+                    terminal.scroll_display(Scroll::Delta(-1));
+                }
             }
         }
     }

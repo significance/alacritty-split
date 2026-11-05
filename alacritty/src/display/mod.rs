@@ -346,6 +346,9 @@ pub struct Display {
     /// Physical native-window dimensions, independent of pane-local grids.
     pub window_size: PhysicalSize<u32>,
 
+    /// Shared font metrics; every pane uses the same cell dimensions.
+    cell_size: (f32, f32),
+
     pub raw_window_handle: RawWindowHandle,
 
     /// Unprocessed display updates.
@@ -431,6 +434,30 @@ impl PaneView {
             ime: Ime::default(),
             hint_mouse_point: None,
         }
+    }
+
+    /// Compute a local grid from shared font metrics without changing any other pane.
+    fn size_for_rect(
+        &self,
+        cell_size: (f32, f32),
+        config: &UiConfig,
+        scale_factor: f32,
+        message_buffer: &MessageBuffer,
+        search_state: &SearchState,
+    ) -> SizeInfo {
+        let padding = config.window.padding(scale_factor);
+        let mut size = SizeInfo::new(
+            self.rect.width as f32,
+            self.rect.height as f32,
+            cell_size.0,
+            cell_size.1,
+            padding.0,
+            padding.1,
+            config.window.dynamic_padding,
+        );
+        let message_lines = message_buffer.message().map_or(0, |message| message.text(&size).len());
+        size.reserve_lines(message_lines + usize::from(search_state.history_index.is_some()));
+        size
     }
 
     pub fn update_config(&mut self, config: &UiConfig) {
@@ -564,6 +591,7 @@ impl Display {
                 font_size,
                 window,
                 window_size: viewport_size,
+                cell_size: (cell_width, cell_height),
                 pending_renderer_update: Default::default(),
                 pending_update: Default::default(),
                 meter: Default::default(),
@@ -671,11 +699,33 @@ impl Display {
         });
     }
 
-    // XXX: this function must not call to any `OpenGL` related tasks. Renderer updates are
-    // performed in [`Self::process_renderer_update`] right before drawing.
-    //
-    /// Process update events.
-    pub fn handle_update<T>(
+    // XXX: this must not call OpenGL; renderer updates happen immediately before drawing.
+    /// Consume shared window/font updates once, before resizing every pane.
+    pub fn handle_update(&mut self, config: &UiConfig) -> bool {
+        let pending_update = mem::take(&mut self.pending_update);
+        let invalidate = pending_update.font().is_some() || pending_update.cursor_dirty();
+        if invalidate {
+            self.pending_renderer_update.get_or_insert(Default::default()).clear_font_cache = true;
+        }
+        if let Some(font) = pending_update.font() {
+            self.cell_size = Self::update_font_size(&mut self.glyph_cache, config, font);
+            info!("Cell size: {} x {}", self.cell_size.0, self.cell_size.1);
+        }
+        if let Some(dimensions) = pending_update.dimensions() {
+            if dimensions != self.window_size {
+                // resize_pane queues the renderer update when its SizeInfo changes, as before.
+                self.window_size = dimensions;
+            }
+        }
+        if config.window.resize_increments {
+            self.window
+                .set_resize_increments(PhysicalSize::new(self.cell_size.0, self.cell_size.1));
+        }
+        invalidate
+    }
+
+    /// Apply the shared metrics and each pane's own rectangle/search state to its PTY.
+    pub fn resize_pane<T: EventListener>(
         &mut self,
         view: &mut PaneView,
         terminal: &mut Term<T>,
@@ -683,62 +733,14 @@ impl Display {
         message_buffer: &MessageBuffer,
         search_state: &mut SearchState,
         config: &UiConfig,
-    ) where
-        T: EventListener,
-    {
-        let pending_update = mem::take(&mut self.pending_update);
-
-        let (mut cell_width, mut cell_height) =
-            (view.size_info.cell_width(), view.size_info.cell_height());
-
-        if pending_update.font().is_some() || pending_update.cursor_dirty() {
-            let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
-            renderer_update.clear_font_cache = true
-        }
-
-        // Update font size and cell dimensions.
-        if let Some(font) = pending_update.font() {
-            let cell_dimensions = Self::update_font_size(&mut self.glyph_cache, config, font);
-            cell_width = cell_dimensions.0;
-            cell_height = cell_dimensions.1;
-
-            info!("Cell size: {cell_width} x {cell_height}");
-
-            // Mark entire terminal as damaged since glyph size could change without cell size
-            // changes.
-            view.damage_tracker.frame().mark_fully_damaged();
-        }
-
-        let (mut width, mut height) = (view.size_info.width(), view.size_info.height());
-        if let Some(dimensions) = pending_update.dimensions() {
-            self.window_size = dimensions;
-            width = dimensions.width as f32;
-            height = dimensions.height as f32;
-        }
-
-        let padding = config.window.padding(self.window.scale_factor as f32);
-
-        let mut new_size = SizeInfo::new(
-            width,
-            height,
-            cell_width,
-            cell_height,
-            padding.0,
-            padding.1,
-            config.window.dynamic_padding,
+    ) {
+        let new_size = view.size_for_rect(
+            self.cell_size,
+            config,
+            self.window.scale_factor as f32,
+            message_buffer,
+            search_state,
         );
-
-        // Update number of column/lines in the viewport.
-        let search_active = search_state.history_index.is_some();
-        let message_bar_lines = message_buffer.message().map_or(0, |m| m.text(&new_size).len());
-        let search_lines = usize::from(search_active);
-        new_size.reserve_lines(message_bar_lines + search_lines);
-
-        // Update resize increments.
-        if config.window.resize_increments {
-            self.window.set_resize_increments(PhysicalSize::new(cell_width, cell_height));
-        }
-
         // Resize when terminal when its dimensions have changed.
         if view.size_info.screen_lines() != new_size.screen_lines
             || view.size_info.columns() != new_size.columns()
@@ -762,8 +764,6 @@ impl Display {
             // Clear focused search match.
             search_state.clear_focused_match();
         }
-        view.rect.width = new_size.width() as u32;
-        view.rect.height = new_size.height() as u32;
         view.size_info = new_size;
     }
 
@@ -1686,4 +1686,62 @@ fn window_size(
     let height = (padding.1).mul_add(2., grid_height).floor();
 
     PhysicalSize::new(width as u32, height as u32)
+}
+
+#[cfg(test)]
+mod pane_size_tests {
+    use super::*;
+
+    fn view(width: u32, height: u32, config: &UiConfig) -> PaneView {
+        PaneView::new(SizeInfo::new(width as f32, height as f32, 8., 16., 0., 0., false), config)
+    }
+
+    #[test]
+    fn shared_font_change_resizes_different_rectangles_independently() {
+        let config = UiConfig::default();
+        let first = view(800, 600, &config);
+        let second = view(400, 300, &config);
+        let messages = MessageBuffer::default();
+        let search = SearchState::default();
+        let sizes: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|view| view.size_for_rect((10., 20.), &config, 1., &messages, &search))
+            .collect();
+        assert_eq!((sizes[0].columns(), sizes[0].screen_lines()), (80, 30));
+        assert_eq!((sizes[1].columns(), sizes[1].screen_lines()), (40, 15));
+        assert_eq!(sizes[0].cell_width(), sizes[1].cell_width());
+        assert_eq!(sizes[0].cell_height(), sizes[1].cell_height());
+        assert_eq!(first.rect.width, 800);
+        assert_eq!(second.rect.width, 400);
+    }
+
+    #[test]
+    fn search_reserves_space_only_in_its_own_pane() {
+        let config = UiConfig::default();
+        let pane = view(800, 600, &config);
+        let mut search = SearchState::default();
+        let messages = MessageBuffer::default();
+        let normal = pane.size_for_rect((8., 16.), &config, 1., &messages, &search);
+        search.history_index = Some(0);
+        let searching = pane.size_for_rect((8., 16.), &config, 1., &messages, &search);
+        assert_eq!(searching.screen_lines() + 1, normal.screen_lines());
+        assert_eq!(searching.columns(), normal.columns());
+        let other = pane.size_for_rect((8., 16.), &config, 1., &messages, &SearchState::default());
+        assert_eq!(other, normal);
+    }
+
+    #[test]
+    fn tiny_rectangles_keep_terminal_minimums_during_resize() {
+        let config = UiConfig::default();
+        let pane = view(0, 0, &config);
+        let size = pane.size_for_rect(
+            (10., 20.),
+            &config,
+            1.,
+            &MessageBuffer::default(),
+            &SearchState::default(),
+        );
+        assert_eq!(size.columns(), MIN_COLUMNS);
+        assert_eq!(size.screen_lines(), MIN_SCREEN_LINES);
+    }
 }
