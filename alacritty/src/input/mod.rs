@@ -48,6 +48,7 @@ use crate::event::{
     ClickState, Event, EventType, InlineSearchState, Mouse, TouchPurpose, TouchZoom,
 };
 use crate::message_bar::{self, Message};
+use crate::pane::PaneId;
 use crate::scheduler::{Scheduler, TimerId, Topic};
 
 pub mod keyboard;
@@ -82,6 +83,9 @@ pub struct Processor<T: EventListener, A: ActionContext<T>> {
 pub trait ActionContext<T: EventListener> {
     fn write_to_pty<B: Into<Cow<'static, [u8]>>>(&self, _data: B) {}
     fn mark_dirty(&mut self) {}
+    fn pane_id(&self) -> Option<PaneId> {
+        None
+    }
     fn size_info(&self) -> SizeInfo;
     fn copy_selection(&mut self, _ty: ClipboardType) {}
     fn start_selection(&mut self, _ty: SelectionType, _point: Point, _side: Side) {}
@@ -713,7 +717,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
         self.ctx.display().highlighted_hint = hint;
 
-        let timer_id = TimerId::new(Topic::SelectionScrolling, self.ctx.window().id());
+        let timer_id = TimerId::new(Topic::SelectionScrolling, self.ctx.window().id())
+            .with_pane(self.ctx.pane_id());
         self.ctx.scheduler_mut().unschedule(timer_id);
 
         if let MouseButton::Left | MouseButton::Right = button {
@@ -1117,6 +1122,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let scale_factor = self.ctx.window().scale_factor;
         let size = self.ctx.size_info();
         let window_id = self.ctx.window().id();
+        let pane_id = self.ctx.pane_id();
         let scheduler = self.ctx.scheduler_mut();
 
         // Scale constants by DPI.
@@ -1134,15 +1140,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         } else if mouse_y >= start_bottom {
             start_bottom - mouse_y - step
         } else {
-            scheduler.unschedule(TimerId::new(Topic::SelectionScrolling, window_id));
+            scheduler
+                .unschedule(TimerId::new(Topic::SelectionScrolling, window_id).with_pane(pane_id));
             return;
         };
 
         // Scale number of lines scrolled based on distance to boundary.
-        let event = Event::new(EventType::Scroll(Scroll::Delta(delta / step)), Some(window_id));
+        let event = Event::new(EventType::Scroll(Scroll::Delta(delta / step)), Some(window_id))
+            .with_pane(pane_id);
 
         // Schedule event.
-        let timer_id = TimerId::new(Topic::SelectionScrolling, window_id);
+        let timer_id = TimerId::new(Topic::SelectionScrolling, window_id).with_pane(pane_id);
         scheduler.unschedule(timer_id);
         scheduler.schedule(event, SELECTION_SCROLLING_INTERVAL, true, timer_id);
     }

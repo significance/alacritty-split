@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use log::info;
+use winit::event::Event as WinitEvent;
 use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
@@ -42,6 +43,7 @@ pub struct Pane {
 
 impl Pane {
     pub fn new(
+        id: PaneId,
         config: &UiConfig,
         options: &WindowOptions,
         size_info: SizeInfo,
@@ -53,7 +55,7 @@ impl Pane {
 
         info!("PTY dimensions: {:?} x {:?}", size_info.screen_lines(), size_info.columns());
 
-        let event_proxy = EventProxy::new(proxy, window_id);
+        let event_proxy = EventProxy::new(proxy, window_id, id);
 
         // Create the terminal.
         //
@@ -119,5 +121,45 @@ impl Pane {
 impl Drop for Pane {
     fn drop(&mut self) {
         let _ = self.notifier.0.send(Msg::Shutdown);
+    }
+}
+
+/// PTY/timer events keep their originating pane; native input follows focus.
+pub fn event_target(event: &WinitEvent<Event>, focused: PaneId) -> PaneId {
+    match event {
+        WinitEvent::UserEvent(event) => event.pane_id.unwrap_or(focused),
+        _ => focused,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::EventType;
+
+    #[test]
+    fn terminal_events_keep_their_origin_after_focus_changes() {
+        let event =
+            Event::new(EventType::BlinkCursor, WindowId::dummy()).with_pane(Some(PaneId(7)));
+        let event = WinitEvent::UserEvent(event);
+        assert_eq!(event_target(&event, PaneId(2)), PaneId(7));
+        assert_eq!(event_target(&event, PaneId(3)), PaneId(7));
+    }
+
+    #[test]
+    fn unscoped_events_and_native_input_follow_focus() {
+        let event = WinitEvent::UserEvent(Event::new(
+            EventType::Message(crate::message_bar::Message::new(
+                String::new(),
+                crate::message_bar::MessageType::Warning,
+            )),
+            None,
+        ));
+        assert_eq!(event_target(&event, PaneId(3)), PaneId(3));
+        let input = WinitEvent::WindowEvent {
+            window_id: WindowId::dummy(),
+            event: winit::event::WindowEvent::Focused(true),
+        };
+        assert_eq!(event_target(&input, PaneId(9)), PaneId(9));
     }
 }

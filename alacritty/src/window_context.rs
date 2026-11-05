@@ -33,7 +33,7 @@ use crate::event::{ActionContext, Event, EventProxy, Mouse, SearchState, TouchPu
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
-use crate::pane::{Pane, PaneId};
+use crate::pane::{Pane, PaneId, event_target};
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
 
@@ -59,6 +59,32 @@ impl WindowContext {
     /// The active terminal session for this window.
     fn focused_pane(&self) -> &Pane {
         self.panes.get(&self.focused).expect("focused pane")
+    }
+
+    /// Check the origin of asynchronous events before dispatching them.
+    pub fn has_pane(&self, id: PaneId) -> bool {
+        self.panes.contains_key(&id)
+    }
+
+    /// Returns true when the last pane exited and the window should close.
+    pub fn pane_exited(&mut self, pane_id: Option<PaneId>, scheduler: &mut Scheduler) -> bool {
+        let pane_id = pane_id.unwrap_or(self.focused);
+        if !self.has_pane(pane_id) {
+            return false;
+        }
+        if self.panes.len() == 1 {
+            // Retain the terminal for --hold and reference-test serialization.
+            return !self.display.window.hold;
+        }
+        self.panes.remove(&pane_id);
+        scheduler.unschedule_pane(self.id(), pane_id);
+        self.event_queue.retain(|event| !matches!(event, WinitEvent::UserEvent(event) if event.pane_id == Some(pane_id)));
+        if self.focused == pane_id {
+            self.focused = *self.panes.first_key_value().expect("surviving pane").0;
+        }
+        self.dirty = true;
+        self.display.window.request_redraw();
+        false
     }
 
     /// Create initial window context that does bootstrapping the graphics API we're going to use.
@@ -164,7 +190,6 @@ impl WindowContext {
         proxy: EventLoopProxy<Event>,
     ) -> Result<Self, Box<dyn Error>> {
         let preserve_title = options.window_identity.title.is_some();
-        let pane = Pane::new(&config, &options, display.size_info, display.window.id(), proxy)?;
         let focused = PaneId(0);
         let mut context = WindowContext {
             preserve_title,
@@ -183,6 +208,14 @@ impl WindowContext {
             dirty: Default::default(),
         };
         context.focused = context.allocate_pane_id();
+        let pane = Pane::new(
+            context.focused,
+            &context.config,
+            &options,
+            context.display.size_info,
+            context.display.window.id(),
+            proxy,
+        )?;
         context.panes.insert(context.focused, pane);
         Ok(context)
     }
@@ -361,66 +394,82 @@ impl WindowContext {
             },
         }
 
-        // Borrow fields separately so pane state and the shared display can be mutated together.
-        let pane = self.panes.get_mut(&self.focused).expect("focused pane");
-        let mut terminal = pane.terminal.lock();
+        while let Some(next) = self.event_queue.first() {
+            let pane_id = event_target(next, self.focused);
+            let count = self
+                .event_queue
+                .iter()
+                .take_while(|event| event_target(event, self.focused) == pane_id)
+                .count();
+            // Borrow fields separately so pane state and the shared display can be mutated
+            // together.
+            let pane = match self.panes.get_mut(&pane_id) {
+                Some(pane) => pane,
+                None => {
+                    self.event_queue.drain(..count);
+                    continue;
+                },
+            };
+            let mut terminal = pane.terminal.lock();
 
-        let old_is_searching = pane.search_state.history_index.is_some();
+            let old_is_searching = pane.search_state.history_index.is_some();
 
-        let context = ActionContext {
-            cursor_blink_timed_out: &mut pane.cursor_blink_timed_out,
-            prev_bell_cmd: &mut pane.prev_bell_cmd,
-            message_buffer: &mut self.message_buffer,
-            inline_search_state: &mut pane.inline_search_state,
-            search_state: &mut pane.search_state,
-            modifiers: &mut self.modifiers,
-            notifier: &mut pane.notifier,
-            display: &mut self.display,
-            mouse: &mut self.mouse,
-            touch: &mut self.touch,
-            dirty: &mut self.dirty,
-            occluded: &mut self.occluded,
-            terminal: &mut terminal,
-            #[cfg(not(windows))]
-            master_fd: pane.master_fd,
-            #[cfg(not(windows))]
-            shell_pid: pane.shell_pid,
-            preserve_title: self.preserve_title,
-            config: &self.config,
-            event_proxy,
-            #[cfg(target_os = "macos")]
-            event_loop,
-            clipboard,
-            scheduler,
-        };
-        let mut processor = input::Processor::new(context);
+            let context = ActionContext {
+                pane_id,
+                cursor_blink_timed_out: &mut pane.cursor_blink_timed_out,
+                prev_bell_cmd: &mut pane.prev_bell_cmd,
+                message_buffer: &mut self.message_buffer,
+                inline_search_state: &mut pane.inline_search_state,
+                search_state: &mut pane.search_state,
+                modifiers: &mut self.modifiers,
+                notifier: &mut pane.notifier,
+                display: &mut self.display,
+                mouse: &mut self.mouse,
+                touch: &mut self.touch,
+                dirty: &mut self.dirty,
+                occluded: &mut self.occluded,
+                terminal: &mut terminal,
+                #[cfg(not(windows))]
+                master_fd: pane.master_fd,
+                #[cfg(not(windows))]
+                shell_pid: pane.shell_pid,
+                preserve_title: self.preserve_title,
+                config: &self.config,
+                event_proxy,
+                #[cfg(target_os = "macos")]
+                event_loop,
+                clipboard,
+                scheduler,
+            };
+            let mut processor = input::Processor::new(context);
 
-        for event in self.event_queue.drain(..) {
-            processor.handle_event(event);
-        }
+            for event in self.event_queue.drain(..count) {
+                processor.handle_event(event);
+            }
 
-        // Process DisplayUpdate events.
-        if self.display.pending_update.dirty {
-            Self::submit_display_update(
-                &mut terminal,
-                &mut self.display,
-                &mut pane.notifier,
-                &self.message_buffer,
-                &mut pane.search_state,
-                old_is_searching,
-                &self.config,
-            );
-            self.dirty = true;
-        }
+            // Process DisplayUpdate events.
+            if self.display.pending_update.dirty {
+                Self::submit_display_update(
+                    &mut terminal,
+                    &mut self.display,
+                    &mut pane.notifier,
+                    &self.message_buffer,
+                    &mut pane.search_state,
+                    old_is_searching,
+                    &self.config,
+                );
+                self.dirty = true;
+            }
 
-        if self.dirty || self.mouse.hint_highlight_dirty {
-            self.dirty |= self.display.update_highlighted_hints(
-                &terminal,
-                &self.config,
-                &self.mouse,
-                self.modifiers.state(),
-            );
-            self.mouse.hint_highlight_dirty = false;
+            if self.dirty || self.mouse.hint_highlight_dirty {
+                self.dirty |= self.display.update_highlighted_hints(
+                    &terminal,
+                    &self.config,
+                    &self.mouse,
+                    self.modifiers.state(),
+                );
+                self.mouse.hint_highlight_dirty = false;
+            }
         }
 
         // Don't call `request_redraw` when event is `RedrawRequested` since the `dirty` flag

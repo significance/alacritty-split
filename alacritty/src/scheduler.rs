@@ -7,17 +7,27 @@ use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
 use crate::event::Event;
+use crate::pane::PaneId;
 
 /// ID uniquely identifying a timer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TimerId {
     topic: Topic,
     window_id: WindowId,
+    pane_id: Option<PaneId>,
 }
 
 impl TimerId {
     pub fn new(topic: Topic, window_id: WindowId) -> Self {
-        Self { topic, window_id }
+        Self { topic, window_id, pane_id: None }
+    }
+}
+
+impl TimerId {
+    /// Leave frame timers window-scoped; all terminal timers carry a pane identity.
+    pub fn with_pane(mut self, pane_id: Option<PaneId>) -> Self {
+        self.pane_id = pane_id;
+        self
     }
 }
 
@@ -100,11 +110,70 @@ impl Scheduler {
         self.timers.iter().any(|timer| timer.id == id)
     }
 
+    /// Remove all timers for a closed terminal without affecting other panes or frames.
+    pub fn unschedule_pane(&mut self, window_id: WindowId, pane_id: PaneId) {
+        remove_pane_timers(&mut self.timers, window_id, pane_id);
+    }
+
     /// Remove all timers scheduled for a window.
     ///
     /// This must be called when a window is removed to ensure that timers on intervals do not
     /// stick around forever and cause a memory leak.
     pub fn unschedule_window(&mut self, window_id: WindowId) {
         self.timers.retain(|timer| timer.id.window_id != window_id);
+    }
+}
+
+fn remove_pane_timers(timers: &mut VecDeque<Timer>, window_id: WindowId, pane_id: PaneId) {
+    timers.retain(|timer| timer.id.window_id != window_id || timer.id.pane_id != Some(pane_id));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_pane_preserves_other_panes_and_window_frames() {
+        let window = WindowId::dummy();
+        let other_window = WindowId::from(42);
+        let ids = [
+            TimerId::new(Topic::BlinkCursor, window).with_pane(Some(PaneId(0))),
+            TimerId::new(Topic::BlinkTimeout, window).with_pane(Some(PaneId(0))),
+            TimerId::new(Topic::DelayedSearch, window).with_pane(Some(PaneId(1))),
+            TimerId::new(Topic::Frame, window),
+            TimerId::new(Topic::BlinkCursor, other_window).with_pane(Some(PaneId(0))),
+        ];
+        let mut timers = ids
+            .into_iter()
+            .map(|id| Timer {
+                deadline: Instant::now(),
+                event: Event::new(crate::event::EventType::BlinkCursor, id.window_id)
+                    .with_pane(id.pane_id),
+                id,
+                interval: Some(Duration::from_secs(1)),
+            })
+            .collect();
+        remove_pane_timers(&mut timers, window, PaneId(0));
+        assert_eq!(timers.iter().map(|timer| timer.id).collect::<Vec<_>>(), ids[2..]);
+        remove_pane_timers(&mut timers, window, PaneId(0));
+        assert_eq!(timers.len(), 3);
+    }
+
+    #[test]
+    fn pane_timers_do_not_collide_with_each_other_or_window_timers() {
+        let window = WindowId::dummy();
+        for topic in [
+            Topic::BlinkCursor,
+            Topic::BlinkTimeout,
+            Topic::DelayedSearch,
+            Topic::SelectionScrolling,
+        ] {
+            let window_timer = TimerId::new(topic, window);
+            let first = window_timer.with_pane(Some(PaneId(0)));
+            let second = window_timer.with_pane(Some(PaneId(1)));
+            assert_ne!(first, second);
+            assert_ne!(first, window_timer);
+            assert_eq!(first, window_timer.with_pane(Some(PaneId(0))));
+        }
     }
 }
