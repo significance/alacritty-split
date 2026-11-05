@@ -13,7 +13,7 @@ Cmd+Shift+D shortcuts are **not implemented yet**; they belong to Phase 2.
 | 0.3 | `d2ef7884` | Each pane owns its `PaneView`; native window, GL surface/context, renderer, glyph cache and frame scheduling remain shared. |
 | 0.4 | `e796aa91` | Explicit pane origins, pane-local projections and scissor bounds; separate window/pane clears; window message bar drawn outside pane clipping. |
 | 0.5 | `84c3dc17` | Pure hit testing and pointer/touch translation; focused-pane input and outside selection drags preserved. |
-| 0.6 | This review checkpoint | Config/IPC reload applies to every pane; shared font/DPI/window updates are consumed once and applied to each terminal; reference-test output iterates panes. |
+| 0.6 | `6f4de2bd` | Config/IPC reload applies to every pane; shared font/DPI/window updates are consumed once and applied to each terminal; reference-test output iterates panes. |
 
 The single-pane reference-test paths remain `grid.json`, `size.json` and
 `config.json`. A future window with multiple panes writes each session under
