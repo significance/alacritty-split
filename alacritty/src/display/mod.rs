@@ -53,6 +53,7 @@ use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{Message, MessageBuffer, MessageType};
 use crate::pane::geometry::PaneRect;
+use crate::pane::layout::{LayoutParams, MinSize};
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::{self, GlyphCache, Renderer, platform};
 use crate::scheduler::{Scheduler, TimerId, Topic};
@@ -713,7 +714,7 @@ impl Display {
         }
         if let Some(dimensions) = pending_update.dimensions() {
             if dimensions != self.window_size {
-                // resize_pane queues the renderer update when its SizeInfo changes, as before.
+                self.pending_renderer_update.get_or_insert(Default::default()).resize = true;
                 self.window_size = dimensions;
             }
         }
@@ -722,6 +723,22 @@ impl Display {
                 .set_resize_increments(PhysicalSize::new(self.cell_size.0, self.cell_size.1));
         }
         invalidate
+    }
+
+    /// Shared layout inputs, including the space occupied by the window message bar.
+    pub fn layout_params(&self, config: &UiConfig, messages: &MessageBuffer) -> LayoutParams {
+        let padding = config.window.padding(self.window.scale_factor as f32);
+        let size = SizeInfo::new(
+            self.window_size.width as f32,
+            self.window_size.height as f32,
+            self.cell_size.0,
+            self.cell_size.1,
+            padding.0,
+            padding.1,
+            config.window.dynamic_padding,
+        );
+        let lines = messages.message().map_or(0, |message| message.text(&size).len());
+        layout_params(self.window_size, self.cell_size, padding, lines)
     }
 
     /// Apply the shared metrics and each pane's own rectangle/search state to its PTY.
@@ -741,13 +758,15 @@ impl Display {
             message_buffer,
             search_state,
         );
-        // Resize when terminal when its dimensions have changed.
+        // PTY pixel metrics can change even when the grid dimensions stay the same.
+        if new_size != view.size_info {
+            pty_resize_handle.on_resize(new_size.into());
+        }
+
+        // Resize the terminal when its grid dimensions have changed.
         if view.size_info.screen_lines() != new_size.screen_lines
             || view.size_info.columns() != new_size.columns()
         {
-            // Resize PTY.
-            pty_resize_handle.on_resize(new_size.into());
-
             // Resize terminal.
             terminal.resize(new_size);
 
@@ -1688,12 +1707,75 @@ fn window_size(
     PhysicalSize::new(width as u32, height as u32)
 }
 
+/// Convert shared physical metrics to integer layout bounds and minimum pane sizes.
+fn layout_params(
+    window: PhysicalSize<u32>,
+    cell: (f32, f32),
+    padding: (f32, f32),
+    message_lines: usize,
+) -> LayoutParams {
+    let message_height = (message_lines as f32 * cell.1).ceil() as u32;
+    LayoutParams {
+        bounds: PaneRect {
+            x: 0,
+            y: 0,
+            width: window.width,
+            height: window.height.saturating_sub(message_height),
+        },
+        divider: 1,
+        minimum: MinSize {
+            width: (MIN_COLUMNS as f32 * cell.0 + 2. * padding.0).ceil() as u32,
+            height: (MIN_SCREEN_LINES as f32 * cell.1 + 2. * padding.1).ceil() as u32,
+        },
+    }
+}
+
 #[cfg(test)]
 mod pane_size_tests {
     use super::*;
 
     fn view(width: u32, height: u32, config: &UiConfig) -> PaneView {
         PaneView::new(SizeInfo::new(width as f32, height as f32, 8., 16., 0., 0., false), config)
+    }
+
+    #[test]
+    fn layout_reserves_messages_and_rounds_minimum_up() {
+        let params = layout_params(PhysicalSize::new(800, 600), (8.5, 16.), (2.25, 3.), 2);
+        assert_eq!(params.bounds.height, 568);
+        assert_eq!(params.bounds.width, 800);
+        assert_eq!(params.minimum.width, (MIN_COLUMNS as f32 * 8.5 + 4.5).ceil() as u32);
+        assert_eq!(params.minimum.height, MIN_SCREEN_LINES as u32 * 16 + 6);
+        let tiny = layout_params(PhysicalSize::new(1, 1), (8., 16.), (0., 0.), 10);
+        assert_eq!(tiny.bounds.height, 0);
+    }
+
+    #[test]
+    fn message_layout_preserves_single_pane_grid_and_padding() {
+        let mut config = UiConfig::default();
+        config.window.dynamic_padding = true;
+        let mut messages = MessageBuffer::default();
+        messages.push(Message::new("warning\nsecond line".into(), MessageType::Warning));
+        let search = SearchState::default();
+        for height in [400, 401, 415, 600] {
+            let original = view(803, height, &config);
+            let old = original.size_for_rect((8., 16.), &config, 1., &messages, &search);
+            let full =
+                original.size_for_rect((8., 16.), &config, 1., &MessageBuffer::default(), &search);
+            let lines = messages.message().unwrap().text(&full).len();
+            let params = layout_params(
+                PhysicalSize::new(803, height),
+                (8., 16.),
+                config.window.padding(1.),
+                lines,
+            );
+            let resized = view(params.bounds.width, params.bounds.height, &config);
+            let new =
+                resized.size_for_rect((8., 16.), &config, 1., &MessageBuffer::default(), &search);
+            assert_eq!(new.columns(), old.columns());
+            assert_eq!(new.screen_lines(), old.screen_lines());
+            assert_eq!(new.padding_x(), old.padding_x());
+            assert_eq!(new.padding_y(), old.padding_y());
+        }
     }
 
     #[test]

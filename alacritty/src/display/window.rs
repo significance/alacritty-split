@@ -384,6 +384,10 @@ impl Window {
         self.window.set_minimized(minimized);
     }
 
+    pub fn set_min_inner_size(&self, size: PhysicalSize<u32>) {
+        self.window.set_min_inner_size(Some(size));
+    }
+
     pub fn set_resize_increments(&self, increments: PhysicalSize<f32>) {
         self.window.set_resize_increments(Some(increments));
     }

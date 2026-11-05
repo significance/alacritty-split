@@ -1,8 +1,6 @@
 //! Independent terminal sessions within a native window.
 
 pub mod geometry;
-// The pure layout API is connected to native panes in Phase 2.
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod layout;
 
 use std::error::Error;
