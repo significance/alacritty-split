@@ -13,6 +13,7 @@ use glutin::display::GetGlDisplay;
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
 use glutin::platform::x11::X11GlConfigExt;
 use serde_json as json;
+use winit::dpi::PhysicalPosition;
 use winit::event::{Event as WinitEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasDisplayHandle;
@@ -33,6 +34,7 @@ use crate::event::{ActionContext, Event, EventProxy, Mouse, TouchPurpose};
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
+use crate::pane::geometry::hit_test;
 use crate::pane::{Pane, PaneId, event_target};
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
@@ -48,6 +50,7 @@ pub struct WindowContext {
     next_pane_id: u64,
     modifiers: Modifiers,
     mouse: Mouse,
+    pointer_pane: Option<PaneId>,
     touch: TouchPurpose,
     occluded: bool,
     preserve_title: bool,
@@ -77,6 +80,9 @@ impl WindowContext {
             return !self.display.window.hold;
         }
         self.panes.remove(&pane_id);
+        if self.pointer_pane == Some(pane_id) {
+            self.pointer_pane = None;
+        }
         scheduler.unschedule_pane(self.id(), pane_id);
         self.event_queue.retain(|event| {
             !matches!(event, WinitEvent::UserEvent(event) if event.pane_id == Some(pane_id))
@@ -210,6 +216,7 @@ impl WindowContext {
             modifiers: Default::default(),
             occluded: Default::default(),
             mouse: Default::default(),
+            pointer_pane: None,
             touch: Default::default(),
             dirty: Default::default(),
         };
@@ -385,6 +392,24 @@ impl WindowContext {
         );
     }
 
+    /// Hit-test in window coordinates before giving the input processor local pixels.
+    fn translate_pointer_event(&mut self, event: &mut WinitEvent<Event>) {
+        let position = match event {
+            WinitEvent::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. }, ..
+            } => position,
+            WinitEvent::WindowEvent { event: WindowEvent::Touch(touch), .. } => &mut touch.location,
+            _ => return,
+        };
+        let window_position = (position.x, position.y);
+        self.pointer_pane =
+            hit_test(self.panes.iter().map(|(&id, pane)| (id, pane.view.rect)), window_position);
+        // Input remains focused-pane scoped; click-to-focus policy comes with split panes.
+        // Keeping out-of-bounds local coordinates preserves selection dragging.
+        let local = self.focused_pane().view.rect.local_position(window_position);
+        *position = PhysicalPosition::new(local.0, local.1);
+    }
+
     /// Process events for this terminal window.
     pub fn handle_event(
         &mut self,
@@ -404,7 +429,8 @@ impl WindowContext {
 
                 // Continue to process all pending events.
             },
-            event => {
+            mut event => {
+                self.translate_pointer_event(&mut event);
                 self.event_queue.push(event);
                 return;
             },
