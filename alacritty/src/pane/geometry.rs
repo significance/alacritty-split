@@ -25,6 +25,18 @@ impl PaneRect {
         (position.0 - f64::from(self.x), position.1 - f64::from(self.y))
     }
 
+    /// Four inward-facing border strips; zero-sized bounds produce empty strips.
+    pub fn edges(self, thickness: u32) -> [Self; 4] {
+        let horizontal = thickness.min(self.height);
+        let vertical = thickness.min(self.width);
+        [
+            Self { height: horizontal, ..self },
+            Self { y: self.y.saturating_add(self.height - horizontal), height: horizontal, ..self },
+            Self { width: vertical, ..self },
+            Self { x: self.x.saturating_add(self.width - vertical), width: vertical, ..self },
+        ]
+    }
+
     /// OpenGL uses a bottom-left origin while window input uses top-left.
     pub fn gl_origin(self, window_height: u32) -> (i32, i32) {
         let x = i64::from(self.x);
@@ -45,6 +57,21 @@ pub fn hit_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_edges_stay_inside_panes_including_tiny_bounds() {
+        for (width, height, thickness) in [(100, 80, 1), (1, 1, 3), (0, 0, 1)] {
+            let pane = PaneRect { x: 12, y: 20, width, height };
+            for edge in pane.edges(thickness) {
+                assert!(edge.x >= pane.x && edge.y >= pane.y);
+                assert!(edge.x + edge.width <= pane.x + pane.width);
+                assert!(edge.y + edge.height <= pane.y + pane.height);
+            }
+        }
+        let edges = PaneRect { x: 12, y: 20, width: 100, height: 80 }.edges(1);
+        assert_eq!(edges[1], PaneRect { x: 12, y: 99, width: 100, height: 1 });
+        assert_eq!(edges[3], PaneRect { x: 111, y: 20, width: 1, height: 80 });
+    }
 
     #[test]
     fn single_pane_pointer_mapping_is_identity() {

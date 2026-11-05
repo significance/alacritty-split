@@ -358,36 +358,47 @@ impl WindowContext {
 
         self.dirty = false;
 
-        // Force the display to process any pending display update.
-        let pane = self.panes.get_mut(&self.focused).expect("focused pane");
-        self.display.process_renderer_update(&mut pane.view);
-
-        // Request immediate re-draw if visual bell animation is not finished yet.
-        if !pane.view.visual_bell.completed() {
-            // We can get an OS redraw which bypasses alacritty's frame throttling, thus
-            // marking the window as dirty when we don't have frame yet.
-            if self.display.window.has_frame {
-                self.display.window.request_redraw();
-            } else {
-                self.dirty = true;
+        let focused = self.panes.get_mut(&self.focused).expect("focused pane");
+        self.display.process_renderer_update(&mut focused.view);
+        let context_reset = self.display.begin_frame(&self.config);
+        for pane in self.panes.values_mut() {
+            if context_reset {
+                pane.view.damage_tracker.frame().mark_fully_damaged();
             }
+            if !pane.view.visual_bell.completed() {
+                if self.display.window.has_frame {
+                    self.display.window.request_redraw();
+                } else {
+                    self.dirty = true;
+                }
+            }
+            let terminal = pane.terminal.lock();
+            self.display.draw(&mut pane.view, terminal, &self.config, &mut pane.search_state);
         }
-
-        // Clear the native surface before the pane's scissored clear/draw.
-        if self.display.begin_frame(&self.config) {
-            pane.view.damage_tracker.frame().mark_fully_damaged();
+        let multiple_panes = self.panes.len() > 1;
+        if multiple_panes {
+            let mut params = self.display.layout_params(&self.config, &self.message_buffer);
+            let minimum = self.layout.minimum(params).expect("valid layout minimum");
+            params.bounds.width = params.bounds.width.max(minimum.width);
+            params.bounds.height = params.bounds.height.max(minimum.height);
+            let geometry = self.layout.geometry(params).expect("minimum-sized layout");
+            self.display.draw_pane_edges(
+                geometry.dividers.into_iter().map(|divider| divider.rect),
+                self.panes[&self.focused].view.rect,
+                &self.config,
+            );
         }
-
-        // Redraw the window.
-        let terminal = pane.terminal.lock();
-        self.display.draw(
-            &mut pane.view,
-            terminal,
+        let focused = self.panes.get_mut(&self.focused).expect("focused pane");
+        self.display.finish_frame(
+            &mut focused.view,
             scheduler,
             &self.message_buffer,
             &self.config,
-            &mut pane.search_state,
+            multiple_panes,
         );
+        for pane in self.panes.values_mut() {
+            pane.view.damage_tracker.swap_damage();
+        }
     }
 
     /// Hit-test in window coordinates before giving the input processor local pixels.

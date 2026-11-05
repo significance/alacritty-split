@@ -660,13 +660,14 @@ impl Display {
         true
     }
 
-    fn swap_buffers(&self, view: &mut PaneView) {
+    fn swap_buffers(&self, view: &mut PaneView, full_damage: bool) {
         #[allow(clippy::single_match)]
         let res = match (self.surface.deref(), &self.context.deref()) {
             #[cfg(not(any(target_os = "macos", windows)))]
             (Surface::Egl(surface), PossiblyCurrentContext::Egl(context))
                 if matches!(self.raw_window_handle, RawWindowHandle::Wayland(_))
-                    && !view.damage_tracker.debug =>
+                    && !view.damage_tracker.debug
+                    && !full_damage =>
             {
                 let damage = view.damage_tracker.shape_frame_damage(view.size_info.into());
                 surface.swap_buffers_with_damage(context, &damage)
@@ -831,13 +832,11 @@ impl Display {
     ///
     /// A reference to Term whose state is being drawn must be provided.
     ///
-    /// This call may block if vsync is enabled.
+    /// Draw one pane; presentation happens once after all panes and window overlays.
     pub fn draw<T: EventListener>(
         &mut self,
         view: &mut PaneView,
         mut terminal: MutexGuard<'_, Term<T>>,
-        scheduler: &mut Scheduler,
-        message_buffer: &MessageBuffer,
         config: &UiConfig,
         search_state: &mut SearchState,
     ) {
@@ -1032,10 +1031,6 @@ impl Display {
             &metrics,
             rects,
         );
-        if let Some(message) = message_buffer.message() {
-            self.draw_message_bar(view, message, config);
-        }
-
         self.draw_render_timer(view, config);
 
         // Draw hyperlink uri preview.
@@ -1043,9 +1038,6 @@ impl Display {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
             self.draw_hyperlink_preview(view, config, cursor_point, display_offset);
         }
-
-        // Notify winit that we're about to present.
-        self.window.pre_present_notify();
 
         // Highlight damage for debugging.
         if view.damage_tracker.debug {
@@ -1061,9 +1053,26 @@ impl Display {
         }
 
         self.renderer.end_pane();
+    }
+
+    /// Present the native window exactly once, after every pane has drawn.
+    pub fn finish_frame(
+        &mut self,
+        view: &mut PaneView,
+        scheduler: &mut Scheduler,
+        messages: &MessageBuffer,
+        config: &UiConfig,
+        multiple_panes: bool,
+    ) {
+        if let Some(message) = messages.message() {
+            self.draw_message_bar(view, message, config);
+            self.renderer.end_pane();
+        }
+        self.window.pre_present_notify();
 
         // Clearing debug highlights from the previous frame requires full redraw.
-        self.swap_buffers(view);
+        // Pane-local damage cannot describe window overlays or other panes.
+        self.swap_buffers(view, multiple_panes || messages.message().is_some());
 
         if matches!(self.raw_window_handle, RawWindowHandle::Xcb(_) | RawWindowHandle::Xlib(_)) {
             // On X11 `swap_buffers` does not block for vsync. However the next OpenGl command
@@ -1077,8 +1086,42 @@ impl Display {
         if !matches!(self.raw_window_handle, RawWindowHandle::Wayland(_)) {
             self.request_frame(scheduler);
         }
+    }
 
-        view.damage_tracker.swap_damage();
+    /// Draw dividers and a focused-pane edge indicator in window coordinates.
+    pub fn draw_pane_edges(
+        &mut self,
+        dividers: impl IntoIterator<Item = PaneRect>,
+        focused: PaneRect,
+        config: &UiConfig,
+    ) {
+        let size = SizeInfo::new(
+            self.window_size.width as f32,
+            self.window_size.height as f32,
+            self.cell_size.0,
+            self.cell_size.1,
+            0.,
+            0.,
+            false,
+        );
+        let color = config.colors.primary.foreground;
+        let rects = dividers
+            .into_iter()
+            .chain(focused.edges(1))
+            .map(|rect| {
+                RenderRect::new(
+                    rect.x as f32,
+                    rect.y as f32,
+                    rect.width as f32,
+                    rect.height as f32,
+                    color,
+                    1.,
+                )
+            })
+            .collect();
+        self.renderer.end_pane();
+        self.renderer.resize(&size, (0, 0));
+        self.renderer.draw_rects(&size, (0, 0), &self.glyph_cache.font_metrics(), rects);
     }
 
     /// Messages cover the native window, independent of pane origin or clipping.
