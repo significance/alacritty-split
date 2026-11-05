@@ -1,20 +1,16 @@
 //! Terminal window context.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
 use std::mem;
-#[cfg(not(windows))]
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Instant;
 
 use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
 use glutin::platform::x11::X11GlConfigExt;
-use log::info;
 use serde_json as json;
 use winit::event::{Event as WinitEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -22,25 +18,22 @@ use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::WindowId;
 
 use alacritty_terminal::event::Event as TerminalEvent;
-use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
+use alacritty_terminal::event_loop::Notifier;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Direction;
-use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Term, TermMode};
-use alacritty_terminal::tty;
 
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
 use crate::display::Display;
 use crate::display::window::Window;
-use crate::event::{
-    ActionContext, Event, EventProxy, InlineSearchState, Mouse, SearchState, TouchPurpose,
-};
+use crate::event::{ActionContext, Event, EventProxy, Mouse, SearchState, TouchPurpose};
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
+use crate::pane::{Pane, PaneId};
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
 
@@ -50,26 +43,24 @@ pub struct WindowContext {
     pub display: Display,
     pub dirty: bool,
     event_queue: Vec<WinitEvent<Event>>,
-    terminal: Arc<FairMutex<Term<EventProxy>>>,
-    cursor_blink_timed_out: bool,
-    prev_bell_cmd: Option<Instant>,
+    panes: BTreeMap<PaneId, Pane>,
+    focused: PaneId,
+    next_pane_id: u64,
     modifiers: Modifiers,
-    inline_search_state: InlineSearchState,
-    search_state: SearchState,
-    notifier: Notifier,
     mouse: Mouse,
     touch: TouchPurpose,
     occluded: bool,
     preserve_title: bool,
-    #[cfg(not(windows))]
-    master_fd: RawFd,
-    #[cfg(not(windows))]
-    shell_pid: u32,
     window_config: ParsedOptions,
     config: Rc<UiConfig>,
 }
 
 impl WindowContext {
+    /// The active terminal session for this window.
+    fn focused_pane(&self) -> &Pane {
+        self.panes.get(&self.focused).expect("focused pane")
+    }
+
     /// Create initial window context that does bootstrapping the graphics API we're going to use.
     pub fn initial(
         event_loop: &ActiveEventLoop,
@@ -172,89 +163,35 @@ impl WindowContext {
         options: WindowOptions,
         proxy: EventLoopProxy<Event>,
     ) -> Result<Self, Box<dyn Error>> {
-        let mut pty_config = config.pty_config();
-        options.terminal_options.override_pty_config(&mut pty_config);
-
         let preserve_title = options.window_identity.title.is_some();
-
-        info!(
-            "PTY dimensions: {:?} x {:?}",
-            display.size_info.screen_lines(),
-            display.size_info.columns()
-        );
-
-        let event_proxy = EventProxy::new(proxy, display.window.id());
-
-        // Create the terminal.
-        //
-        // This object contains all of the state about what's being displayed. It's
-        // wrapped in a clonable mutex since both the I/O loop and display need to
-        // access it.
-        let terminal = Term::new(config.term_options(), &display.size_info, event_proxy.clone());
-        let terminal = Arc::new(FairMutex::new(terminal));
-
-        // Create the PTY.
-        //
-        // The PTY forks a process to run the shell on the slave side of the
-        // pseudoterminal. A file descriptor for the master side is retained for
-        // reading/writing to the shell.
-        let pty = tty::new(&pty_config, display.size_info.into(), display.window.id().into())?;
-
-        #[cfg(not(windows))]
-        let master_fd = pty.file().as_raw_fd();
-        #[cfg(not(windows))]
-        let shell_pid = pty.child().id();
-
-        // Create the pseudoterminal I/O loop.
-        //
-        // PTY I/O is ran on another thread as to not occupy cycles used by the
-        // renderer and input processing. Note that access to the terminal state is
-        // synchronized since the I/O loop updates the state, and the display
-        // consumes it periodically.
-        let event_loop = PtyEventLoop::new(
-            Arc::clone(&terminal),
-            event_proxy.clone(),
-            pty,
-            pty_config.drain_on_exit,
-            config.debug.ref_test,
-        )?;
-
-        // The event loop channel allows write requests from the event processor
-        // to be sent to the pty loop and ultimately written to the pty.
-        let loop_tx = event_loop.channel();
-
-        // Kick off the I/O thread.
-        let _io_thread = event_loop.spawn();
-
-        // Start cursor blinking, in case `Focused` isn't sent on startup.
-        if config.cursor.style().blinking {
-            event_proxy.send_event(TerminalEvent::CursorBlinkingChange.into());
-        }
-
-        // Create context for the Alacritty window.
-        Ok(WindowContext {
+        let pane = Pane::new(&config, &options, display.size_info, display.window.id(), proxy)?;
+        let focused = PaneId(0);
+        let mut context = WindowContext {
             preserve_title,
-            terminal,
+            panes: Default::default(),
+            focused,
+            next_pane_id: 0,
             display,
-            #[cfg(not(windows))]
-            master_fd,
-            #[cfg(not(windows))]
-            shell_pid,
             config,
-            notifier: Notifier(loop_tx),
-            cursor_blink_timed_out: Default::default(),
-            prev_bell_cmd: Default::default(),
-            inline_search_state: Default::default(),
             message_buffer: Default::default(),
             window_config: Default::default(),
-            search_state: Default::default(),
             event_queue: Default::default(),
             modifiers: Default::default(),
             occluded: Default::default(),
             mouse: Default::default(),
             touch: Default::default(),
             dirty: Default::default(),
-        })
+        };
+        context.focused = context.allocate_pane_id();
+        context.panes.insert(context.focused, pane);
+        Ok(context)
+    }
+
+    /// Reserve a unique identity, including for failed future pane creations.
+    fn allocate_pane_id(&mut self) -> PaneId {
+        let id = PaneId(self.next_pane_id);
+        self.next_pane_id = self.next_pane_id.checked_add(1).expect("pane ID space exhausted");
+        id
     }
 
     /// Update the terminal window to the latest config.
@@ -265,7 +202,7 @@ impl WindowContext {
         self.config = self.window_config.override_config_rc(self.config.clone());
 
         self.display.update_config(&self.config);
-        self.terminal.lock().set_options(self.config.term_options());
+        self.focused_pane().terminal.lock().set_options(self.config.term_options());
 
         // Reload cursor if its thickness has changed.
         if (old_config.cursor.thickness() - self.config.cursor.thickness()).abs() > f32::EPSILON {
@@ -387,13 +324,15 @@ impl WindowContext {
         }
 
         // Redraw the window.
-        let terminal = self.terminal.lock();
+        // Borrow fields separately so pane state and the shared display can be mutated together.
+        let pane = self.panes.get_mut(&self.focused).expect("focused pane");
+        let terminal = pane.terminal.lock();
         self.display.draw(
             terminal,
             scheduler,
             &self.message_buffer,
             &self.config,
-            &mut self.search_state,
+            &mut pane.search_state,
         );
     }
 
@@ -422,18 +361,20 @@ impl WindowContext {
             },
         }
 
-        let mut terminal = self.terminal.lock();
+        // Borrow fields separately so pane state and the shared display can be mutated together.
+        let pane = self.panes.get_mut(&self.focused).expect("focused pane");
+        let mut terminal = pane.terminal.lock();
 
-        let old_is_searching = self.search_state.history_index.is_some();
+        let old_is_searching = pane.search_state.history_index.is_some();
 
         let context = ActionContext {
-            cursor_blink_timed_out: &mut self.cursor_blink_timed_out,
-            prev_bell_cmd: &mut self.prev_bell_cmd,
+            cursor_blink_timed_out: &mut pane.cursor_blink_timed_out,
+            prev_bell_cmd: &mut pane.prev_bell_cmd,
             message_buffer: &mut self.message_buffer,
-            inline_search_state: &mut self.inline_search_state,
-            search_state: &mut self.search_state,
+            inline_search_state: &mut pane.inline_search_state,
+            search_state: &mut pane.search_state,
             modifiers: &mut self.modifiers,
-            notifier: &mut self.notifier,
+            notifier: &mut pane.notifier,
             display: &mut self.display,
             mouse: &mut self.mouse,
             touch: &mut self.touch,
@@ -441,9 +382,9 @@ impl WindowContext {
             occluded: &mut self.occluded,
             terminal: &mut terminal,
             #[cfg(not(windows))]
-            master_fd: self.master_fd,
+            master_fd: pane.master_fd,
             #[cfg(not(windows))]
-            shell_pid: self.shell_pid,
+            shell_pid: pane.shell_pid,
             preserve_title: self.preserve_title,
             config: &self.config,
             event_proxy,
@@ -463,9 +404,9 @@ impl WindowContext {
             Self::submit_display_update(
                 &mut terminal,
                 &mut self.display,
-                &mut self.notifier,
+                &mut pane.notifier,
                 &self.message_buffer,
-                &mut self.search_state,
+                &mut pane.search_state,
                 old_is_searching,
                 &self.config,
             );
@@ -501,7 +442,7 @@ impl WindowContext {
     /// Write the ref test results to the disk.
     pub fn write_ref_test_results(&self) {
         // Dump grid state.
-        let mut grid = self.terminal.lock().grid().clone();
+        let mut grid = self.focused_pane().terminal.lock().grid().clone();
         grid.initialize_all();
         grid.truncate();
 
@@ -557,12 +498,5 @@ impl WindowContext {
                 terminal.scroll_display(Scroll::Delta(-1));
             }
         }
-    }
-}
-
-impl Drop for WindowContext {
-    fn drop(&mut self) {
-        // Shutdown the terminal's PTY.
-        let _ = self.notifier.0.send(Msg::Shutdown);
     }
 }
