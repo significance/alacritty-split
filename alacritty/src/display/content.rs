@@ -15,7 +15,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use crate::config::UiConfig;
 use crate::display::color::{CellRgb, DIM_FACTOR, List, Rgb};
 use crate::display::hint::{self, HintState};
-use crate::display::{Display, SizeInfo};
+use crate::display::{PaneView, SizeInfo};
 use crate::event::SearchState;
 
 /// Minimum contrast between a fixed cursor color and the cell's background.
@@ -40,7 +40,7 @@ pub struct RenderableContent<'a> {
 impl<'a> RenderableContent<'a> {
     pub fn new<T: EventListener>(
         config: &'a UiConfig,
-        display: &'a mut Display,
+        display: &'a mut PaneView,
         term: &'a Term<T>,
         search_state: &'a mut SearchState,
     ) -> Self {

@@ -342,30 +342,10 @@ impl DisplayUpdate {
 pub struct Display {
     pub window: Window,
 
-    pub size_info: SizeInfo,
-
-    /// Hint highlighted by the mouse.
-    pub highlighted_hint: Option<HintMatch>,
-    /// Frames since hint highlight was created.
-    highlighted_hint_age: usize,
-
-    /// Hint highlighted by the vi mode cursor.
-    pub vi_highlighted_hint: Option<HintMatch>,
-    /// Frames since hint highlight was created.
-    vi_highlighted_hint_age: usize,
+    /// Physical native-window dimensions, independent of pane-local grids.
+    pub window_size: PhysicalSize<u32>,
 
     pub raw_window_handle: RawWindowHandle,
-
-    /// UI cursor visibility for blinking.
-    pub cursor_hidden: bool,
-
-    pub visual_bell: VisualBell,
-
-    /// Mapped RGB values for each terminal color.
-    pub colors: List,
-
-    /// State of the keyboard hints.
-    pub hint_state: HintState,
 
     /// Unprocessed display updates.
     pub pending_update: DisplayUpdate,
@@ -373,20 +353,11 @@ pub struct Display {
     /// The renderer update that takes place only once before the actual rendering.
     pub pending_renderer_update: Option<RendererUpdate>,
 
-    /// The ime on the given display.
-    pub ime: Ime,
-
     /// The state of the timer for frame scheduling.
     pub frame_timer: FrameTimer,
 
-    /// Damage tracker for the given display.
-    pub damage_tracker: DamageTracker,
-
     /// Font size used by the window.
     pub font_size: FontSize,
-
-    // Mouse point position when highlighting hints.
-    hint_mouse_point: Option<Point>,
 
     renderer: ManuallyDrop<Renderer>,
     renderer_preference: Option<RendererPreference>,
@@ -399,13 +370,75 @@ pub struct Display {
     meter: Meter,
 }
 
+/// Per-terminal presentation state, owned by a pane rather than its native window.
+pub struct PaneView {
+    pub size_info: SizeInfo,
+
+    /// Hint highlighted by the mouse.
+    pub highlighted_hint: Option<HintMatch>,
+    /// Frames since hint highlight was created.
+    highlighted_hint_age: usize,
+
+    /// Hint highlighted by the vi mode cursor.
+    pub vi_highlighted_hint: Option<HintMatch>,
+    /// Frames since hint highlight was created.
+    vi_highlighted_hint_age: usize,
+
+    /// UI cursor visibility for blinking.
+    pub cursor_hidden: bool,
+
+    pub visual_bell: VisualBell,
+
+    /// Mapped RGB values for each terminal color.
+    pub colors: List,
+
+    /// State of the keyboard hints.
+    pub hint_state: HintState,
+
+    /// The ime on the given display.
+    pub ime: Ime,
+
+    /// Damage tracker for the given display.
+    pub damage_tracker: DamageTracker,
+
+    // Mouse point position when highlighting hints.
+    hint_mouse_point: Option<Point>,
+}
+
+impl PaneView {
+    pub fn new(size_info: SizeInfo, config: &UiConfig) -> Self {
+        let mut damage_tracker = DamageTracker::new(size_info.screen_lines(), size_info.columns());
+        damage_tracker.debug = config.debug.highlight_damage;
+        Self {
+            size_info,
+            damage_tracker,
+            visual_bell: VisualBell::from(&config.bell),
+            colors: List::from(&config.colors),
+            hint_state: HintState::new(config.hints.alphabet()),
+            highlighted_hint: None,
+            highlighted_hint_age: 0,
+            vi_highlighted_hint: None,
+            vi_highlighted_hint_age: 0,
+            cursor_hidden: false,
+            ime: Ime::default(),
+            hint_mouse_point: None,
+        }
+    }
+
+    pub fn update_config(&mut self, config: &UiConfig) {
+        self.damage_tracker.debug = config.debug.highlight_damage;
+        self.visual_bell.update_config(&config.bell);
+        self.colors = List::from(&config.colors);
+    }
+}
+
 impl Display {
     pub fn new(
         window: Window,
         gl_context: NotCurrentContext,
         config: &UiConfig,
         _tabbed: bool,
-    ) -> Result<Display, Error> {
+    ) -> Result<(Display, PaneView), Error> {
         let raw_window_handle = window.raw_window_handle();
 
         let scale_factor = window.scale_factor as f32;
@@ -504,42 +537,31 @@ impl Display {
             }
         }
 
-        let hint_state = HintState::new(config.hints.alphabet());
-
-        let mut damage_tracker = DamageTracker::new(size_info.screen_lines(), size_info.columns());
-        damage_tracker.debug = config.debug.highlight_damage;
+        let pane_view = PaneView::new(size_info, config);
 
         // Disable vsync.
         if let Err(err) = surface.set_swap_interval(&context, SwapInterval::DontWait) {
             info!("Failed to disable vsync: {err}");
         }
 
-        Ok(Self {
-            context: ManuallyDrop::new(context),
-            visual_bell: VisualBell::from(&config.bell),
-            renderer: ManuallyDrop::new(renderer),
-            renderer_preference: config.debug.renderer,
-            surface: ManuallyDrop::new(surface),
-            colors: List::from(&config.colors),
-            frame_timer: FrameTimer::new(),
-            raw_window_handle,
-            damage_tracker,
-            glyph_cache,
-            hint_state,
-            size_info,
-            font_size,
-            window,
-            pending_renderer_update: Default::default(),
-            vi_highlighted_hint_age: Default::default(),
-            highlighted_hint_age: Default::default(),
-            vi_highlighted_hint: Default::default(),
-            highlighted_hint: Default::default(),
-            hint_mouse_point: Default::default(),
-            pending_update: Default::default(),
-            cursor_hidden: Default::default(),
-            meter: Default::default(),
-            ime: Default::default(),
-        })
+        Ok((
+            Self {
+                context: ManuallyDrop::new(context),
+                renderer: ManuallyDrop::new(renderer),
+                renderer_preference: config.debug.renderer,
+                surface: ManuallyDrop::new(surface),
+                frame_timer: FrameTimer::new(),
+                raw_window_handle,
+                glyph_cache,
+                font_size,
+                window,
+                window_size: viewport_size,
+                pending_renderer_update: Default::default(),
+                pending_update: Default::default(),
+                meter: Default::default(),
+            },
+            pane_view,
+        ))
     }
 
     #[inline]
@@ -553,7 +575,7 @@ impl Display {
         }
     }
 
-    pub fn make_current(&mut self) {
+    pub fn make_current(&mut self) -> bool {
         let is_current = self.context.is_current();
 
         // Attempt to make the context current if it's not.
@@ -570,7 +592,7 @@ impl Display {
         };
 
         if !context_loss {
-            return;
+            return false;
         }
 
         let gl_display = self.context.display();
@@ -595,24 +617,21 @@ impl Display {
             .expect("failed to recreate renderer after reset");
         self.renderer = ManuallyDrop::new(renderer);
 
-        // Resize the renderer.
-        self.renderer.resize(&self.size_info);
-
         self.reset_glyph_cache();
-        self.damage_tracker.frame().mark_fully_damaged();
 
         debug!("Recovered window {:?} from gpu reset", self.window.id());
+        true
     }
 
-    fn swap_buffers(&self) {
+    fn swap_buffers(&self, view: &mut PaneView) {
         #[allow(clippy::single_match)]
         let res = match (self.surface.deref(), &self.context.deref()) {
             #[cfg(not(any(target_os = "macos", windows)))]
             (Surface::Egl(surface), PossiblyCurrentContext::Egl(context))
                 if matches!(self.raw_window_handle, RawWindowHandle::Wayland(_))
-                    && !self.damage_tracker.debug =>
+                    && !view.damage_tracker.debug =>
             {
-                let damage = self.damage_tracker.shape_frame_damage(self.size_info.into());
+                let damage = view.damage_tracker.shape_frame_damage(view.size_info.into());
                 surface.swap_buffers_with_damage(context, &damage)
             },
             (surface, context) => surface.swap_buffers(context),
@@ -650,6 +669,7 @@ impl Display {
     /// Process update events.
     pub fn handle_update<T>(
         &mut self,
+        view: &mut PaneView,
         terminal: &mut Term<T>,
         pty_resize_handle: &mut dyn OnResize,
         message_buffer: &MessageBuffer,
@@ -661,7 +681,7 @@ impl Display {
         let pending_update = mem::take(&mut self.pending_update);
 
         let (mut cell_width, mut cell_height) =
-            (self.size_info.cell_width(), self.size_info.cell_height());
+            (view.size_info.cell_width(), view.size_info.cell_height());
 
         if pending_update.font().is_some() || pending_update.cursor_dirty() {
             let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
@@ -678,11 +698,12 @@ impl Display {
 
             // Mark entire terminal as damaged since glyph size could change without cell size
             // changes.
-            self.damage_tracker.frame().mark_fully_damaged();
+            view.damage_tracker.frame().mark_fully_damaged();
         }
 
-        let (mut width, mut height) = (self.size_info.width(), self.size_info.height());
+        let (mut width, mut height) = (view.size_info.width(), view.size_info.height());
         if let Some(dimensions) = pending_update.dimensions() {
+            self.window_size = dimensions;
             width = dimensions.width as f32;
             height = dimensions.height as f32;
         }
@@ -711,8 +732,8 @@ impl Display {
         }
 
         // Resize when terminal when its dimensions have changed.
-        if self.size_info.screen_lines() != new_size.screen_lines
-            || self.size_info.columns() != new_size.columns()
+        if view.size_info.screen_lines() != new_size.screen_lines
+            || view.size_info.columns() != new_size.columns()
         {
             // Resize PTY.
             pty_resize_handle.on_resize(new_size.into());
@@ -721,11 +742,11 @@ impl Display {
             terminal.resize(new_size);
 
             // Resize damage tracking.
-            self.damage_tracker.resize(new_size.screen_lines(), new_size.columns());
+            view.damage_tracker.resize(new_size.screen_lines(), new_size.columns());
         }
 
         // Check if dimensions have changed.
-        if new_size != self.size_info {
+        if new_size != view.size_info {
             // Queue renderer update.
             let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
             renderer_update.resize = true;
@@ -733,7 +754,7 @@ impl Display {
             // Clear focused search match.
             search_state.clear_focused_match();
         }
-        self.size_info = new_size;
+        view.size_info = new_size;
     }
 
     // NOTE: Renderer updates are split off, since platforms like Wayland require resize and other
@@ -741,7 +762,7 @@ impl Display {
     // back buffer and render with the previous state. This also solves flickering during resizes.
     //
     /// Update the state of the renderer.
-    pub fn process_renderer_update(&mut self) {
+    pub fn process_renderer_update(&mut self, view: &mut PaneView) {
         let renderer_update = match self.pending_renderer_update.take() {
             Some(renderer_update) => renderer_update,
             _ => return,
@@ -749,22 +770,25 @@ impl Display {
 
         // Resize renderer.
         if renderer_update.resize {
-            let width = NonZeroU32::new(self.size_info.width() as u32).unwrap();
-            let height = NonZeroU32::new(self.size_info.height() as u32).unwrap();
+            let width = NonZeroU32::new(self.window_size.width).unwrap();
+            let height = NonZeroU32::new(self.window_size.height).unwrap();
             self.surface.resize(&self.context, width, height);
         }
 
         // Ensure we're modifying the correct OpenGL context.
-        self.make_current();
+        if self.make_current() {
+            self.renderer.resize(&view.size_info);
+            view.damage_tracker.frame().mark_fully_damaged();
+        }
 
         if renderer_update.clear_font_cache {
             self.reset_glyph_cache();
         }
 
-        self.renderer.resize(&self.size_info);
+        self.renderer.resize(&view.size_info);
 
-        info!("Padding: {} x {}", self.size_info.padding_x(), self.size_info.padding_y());
-        info!("Width: {}, Height: {}", self.size_info.width(), self.size_info.height());
+        info!("Padding: {} x {}", view.size_info.padding_x(), view.size_info.padding_y());
+        info!("Width: {}, Height: {}", view.size_info.width(), view.size_info.height());
     }
 
     /// Draw the screen.
@@ -774,6 +798,7 @@ impl Display {
     /// This call may block if vsync is enabled.
     pub fn draw<T: EventListener>(
         &mut self,
+        view: &mut PaneView,
         mut terminal: MutexGuard<'_, Term<T>>,
         scheduler: &mut Scheduler,
         message_buffer: &MessageBuffer,
@@ -781,7 +806,7 @@ impl Display {
         search_state: &mut SearchState,
     ) {
         // Collect renderable content before the terminal is dropped.
-        let mut content = RenderableContent::new(config, self, &terminal, search_state);
+        let mut content = RenderableContent::new(config, view, &terminal, search_state);
         let mut grid_cells = Vec::new();
         for cell in &mut content {
             grid_cells.push(cell);
@@ -795,17 +820,17 @@ impl Display {
         let cursor_point = terminal.grid().cursor.point;
         let total_lines = terminal.grid().total_lines();
         let metrics = self.glyph_cache.font_metrics();
-        let size_info = self.size_info;
+        let size_info = view.size_info;
 
         let vi_mode = terminal.mode().contains(TermMode::VI);
         let vi_cursor_point = if vi_mode { Some(terminal.vi_mode_cursor.point) } else { None };
 
         // Add damage from the terminal.
         match terminal.damage() {
-            TermDamage::Full => self.damage_tracker.frame().mark_fully_damaged(),
+            TermDamage::Full => view.damage_tracker.frame().mark_fully_damaged(),
             TermDamage::Partial(damaged_lines) => {
                 for damage in damaged_lines {
-                    self.damage_tracker.frame().damage_line(damage);
+                    view.damage_tracker.frame().damage_line(damage);
                 }
             },
         }
@@ -815,32 +840,35 @@ impl Display {
         drop(terminal);
 
         // Invalidate highlighted hints if grid has changed.
-        self.validate_hint_highlights(display_offset);
+        self.validate_hint_highlights(view, display_offset);
 
         // Add damage from alacritty's UI elements overlapping terminal.
 
-        let requires_full_damage = self.visual_bell.intensity() != 0.
-            || self.hint_state.active()
+        let requires_full_damage = view.visual_bell.intensity() != 0.
+            || view.hint_state.active()
             || search_state.regex().is_some();
         if requires_full_damage {
-            self.damage_tracker.frame().mark_fully_damaged();
-            self.damage_tracker.next_frame().mark_fully_damaged();
+            view.damage_tracker.frame().mark_fully_damaged();
+            view.damage_tracker.next_frame().mark_fully_damaged();
         }
 
         let vi_cursor_viewport_point =
             vi_cursor_point.and_then(|cursor| term::point_to_viewport(display_offset, cursor));
-        self.damage_tracker.damage_vi_cursor(vi_cursor_viewport_point);
-        self.damage_tracker.damage_selection(selection_range, display_offset);
+        view.damage_tracker.damage_vi_cursor(vi_cursor_viewport_point);
+        view.damage_tracker.damage_selection(selection_range, display_offset);
 
         // Make sure this window's OpenGL context is active.
-        self.make_current();
+        if self.make_current() {
+            self.renderer.resize(&view.size_info);
+            view.damage_tracker.frame().mark_fully_damaged();
+        }
 
         self.renderer.clear(background_color, config.window_opacity());
         let mut lines = RenderLines::new();
 
         // Optimize loop hint comparator.
         let has_highlighted_hint =
-            self.highlighted_hint.is_some() || self.vi_highlighted_hint.is_some();
+            view.highlighted_hint.is_some() || view.vi_highlighted_hint.is_some();
 
         // Draw grid.
         {
@@ -851,9 +879,9 @@ impl Display {
             self.renderer.set_viewport(&size_info);
 
             let glyph_cache = &mut self.glyph_cache;
-            let highlighted_hint = &self.highlighted_hint;
-            let vi_highlighted_hint = &self.vi_highlighted_hint;
-            let damage_tracker = &mut self.damage_tracker;
+            let highlighted_hint = &view.highlighted_hint;
+            let vi_highlighted_hint = &view.vi_highlighted_hint;
+            let damage_tracker = &mut view.damage_tracker;
 
             let cells = grid_cells.into_iter().map(|mut cell| {
                 // Underline hints hovered by mouse or vi mode cursor.
@@ -886,17 +914,17 @@ impl Display {
             let obstructed_column = Some(vi_cursor_point)
                 .filter(|point| point.line == -(display_offset as i32))
                 .map(|point| point.column);
-            self.draw_line_indicator(config, total_lines, obstructed_column, line);
+            self.draw_line_indicator(view, config, total_lines, obstructed_column, line);
         } else if search_state.regex().is_some() {
             // Show current display offset in vi-less search to indicate match position.
-            self.draw_line_indicator(config, total_lines, None, display_offset);
+            self.draw_line_indicator(view, config, total_lines, None, display_offset);
         };
 
         // Draw cursor.
         rects.extend(cursor.rects(&size_info, config.cursor.thickness()));
 
         // Push visual bell after url/underline/strikeout rects.
-        let visual_bell_intensity = self.visual_bell.intensity();
+        let visual_bell_intensity = view.visual_bell.intensity();
         if visual_bell_intensity != 0. {
             let visual_bell_rect = RenderRect::new(
                 0.,
@@ -920,14 +948,14 @@ impl Display {
                 let search_text = Self::format_search(regex, search_label, size_info.columns());
 
                 // Render the search bar.
-                self.draw_search(config, &search_text);
+                self.draw_search(view, config, &search_text);
 
                 // Draw search bar cursor.
                 let line = size_info.screen_lines();
                 let column = Column(search_text.chars().count() - 1);
 
                 // Add cursor to search bar if IME is not active.
-                if self.ime.preedit().is_none() {
+                if view.ime.preedit().is_none() {
                     let fg = config.colors.footer_bar_foreground();
                     let shape = CursorShape::Underline;
                     let cursor_width = NonZeroU32::new(1).unwrap();
@@ -939,7 +967,7 @@ impl Display {
                 Some(Point::new(line, column))
             },
             None => {
-                let num_lines = self.size_info.screen_lines();
+                let num_lines = view.size_info.screen_lines();
                 match vi_cursor_viewport_point {
                     None => term::point_to_viewport(display_offset, cursor_point)
                         .filter(|point| point.line < num_lines),
@@ -949,7 +977,7 @@ impl Display {
         };
 
         // Handle IME.
-        if self.ime.is_enabled() {
+        if view.ime.is_enabled() {
             if let Some(point) = ime_position {
                 let (fg, bg) = if search_state.regex().is_some() {
                     (config.colors.footer_bar_foreground(), config.colors.footer_bar_background())
@@ -957,7 +985,7 @@ impl Display {
                     (foreground_color, background_color)
                 };
 
-                self.draw_ime_preview(point, fg, bg, &mut rects, config);
+                self.draw_ime_preview(view, point, fg, bg, &mut rects, config);
             }
         }
 
@@ -984,7 +1012,7 @@ impl Display {
             rects.push(message_bar_rect);
 
             // Always damage message bar, since it could have messages of the same size in it.
-            self.damage_tracker.frame().add_viewport_rect(&size_info, x, y as i32, width, height);
+            view.damage_tracker.frame().add_viewport_rect(&size_info, x, y as i32, width, height);
 
             // Draw rectangles.
             self.renderer.draw_rects(&size_info, &metrics, rects);
@@ -1008,27 +1036,27 @@ impl Display {
             self.renderer.draw_rects(&size_info, &metrics, rects);
         }
 
-        self.draw_render_timer(config);
+        self.draw_render_timer(view, config);
 
         // Draw hyperlink uri preview.
         if has_highlighted_hint {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
-            self.draw_hyperlink_preview(config, cursor_point, display_offset);
+            self.draw_hyperlink_preview(view, config, cursor_point, display_offset);
         }
 
         // Notify winit that we're about to present.
         self.window.pre_present_notify();
 
         // Highlight damage for debugging.
-        if self.damage_tracker.debug {
-            let damage = self.damage_tracker.shape_frame_damage(self.size_info.into());
+        if view.damage_tracker.debug {
+            let damage = view.damage_tracker.shape_frame_damage(view.size_info.into());
             let mut rects = Vec::with_capacity(damage.len());
-            self.highlight_damage(&mut rects);
-            self.renderer.draw_rects(&self.size_info, &metrics, rects);
+            self.highlight_damage(view, &mut rects);
+            self.renderer.draw_rects(&view.size_info, &metrics, rects);
         }
 
         // Clearing debug highlights from the previous frame requires full redraw.
-        self.swap_buffers();
+        self.swap_buffers(view);
 
         if matches!(self.raw_window_handle, RawWindowHandle::Xcb(_) | RawWindowHandle::Xlib(_)) {
             // On X11 `swap_buffers` does not block for vsync. However the next OpenGl command
@@ -1043,14 +1071,7 @@ impl Display {
             self.request_frame(scheduler);
         }
 
-        self.damage_tracker.swap_damage();
-    }
-
-    /// Update to a new configuration.
-    pub fn update_config(&mut self, config: &UiConfig) {
-        self.damage_tracker.debug = config.debug.highlight_damage;
-        self.visual_bell.update_config(&config.bell);
-        self.colors = List::from(&config.colors);
+        view.damage_tracker.swap_damage();
     }
 
     /// Update the mouse/vi mode cursor hint highlighting.
@@ -1058,6 +1079,7 @@ impl Display {
     /// This will return whether the highlighted hints changed.
     pub fn update_highlighted_hints<T>(
         &mut self,
+        view: &mut PaneView,
         term: &Term<T>,
         config: &UiConfig,
         mouse: &Mouse,
@@ -1071,13 +1093,13 @@ impl Display {
         } else {
             None
         };
-        let mut dirty = vi_highlighted_hint != self.vi_highlighted_hint;
-        self.vi_highlighted_hint = vi_highlighted_hint;
-        self.vi_highlighted_hint_age = 0;
+        let mut dirty = vi_highlighted_hint != view.vi_highlighted_hint;
+        view.vi_highlighted_hint = vi_highlighted_hint;
+        view.vi_highlighted_hint_age = 0;
 
         // Force full redraw if the vi mode highlight was cleared.
         if dirty {
-            self.damage_tracker.frame().mark_fully_damaged();
+            view.damage_tracker.frame().mark_fully_damaged();
         }
 
         // Abort if mouse highlighting conditions are not met.
@@ -1085,26 +1107,26 @@ impl Display {
             || !mouse.inside_text_area
             || !term.selection.as_ref().is_none_or(Selection::is_empty)
         {
-            if self.highlighted_hint.take().is_some() {
-                self.damage_tracker.frame().mark_fully_damaged();
+            if view.highlighted_hint.take().is_some() {
+                view.damage_tracker.frame().mark_fully_damaged();
                 dirty = true;
             }
             return dirty;
         }
 
         // Find highlighted hint at mouse position.
-        let point = mouse.point(&self.size_info, term.grid().display_offset());
+        let point = mouse.point(&view.size_info, term.grid().display_offset());
         let highlighted_hint = hint::highlighted_at(term, config, point, modifiers);
 
         // Update cursor shape.
         if highlighted_hint.is_some() {
             // If mouse changed the line, we should update the hyperlink preview, since the
             // highlighted hint could be disrupted by the old preview.
-            dirty = self.hint_mouse_point.is_some_and(|p| p.line != point.line);
-            self.hint_mouse_point = Some(point);
+            dirty = view.hint_mouse_point.is_some_and(|p| p.line != point.line);
+            view.hint_mouse_point = Some(point);
             self.window.set_mouse_cursor(CursorIcon::Pointer);
-        } else if self.highlighted_hint.is_some() {
-            self.hint_mouse_point = None;
+        } else if view.highlighted_hint.is_some() {
+            view.hint_mouse_point = None;
             if term.mode().intersects(TermMode::MOUSE_MODE) && !term.mode().contains(TermMode::VI) {
                 self.window.set_mouse_cursor(CursorIcon::Default);
             } else {
@@ -1112,14 +1134,14 @@ impl Display {
             }
         }
 
-        let mouse_highlight_dirty = self.highlighted_hint != highlighted_hint;
+        let mouse_highlight_dirty = view.highlighted_hint != highlighted_hint;
         dirty |= mouse_highlight_dirty;
-        self.highlighted_hint = highlighted_hint;
-        self.highlighted_hint_age = 0;
+        view.highlighted_hint = highlighted_hint;
+        view.highlighted_hint_age = 0;
 
         // Force full redraw if the mouse cursor highlight was changed.
         if mouse_highlight_dirty {
-            self.damage_tracker.frame().mark_fully_damaged();
+            view.damage_tracker.frame().mark_fully_damaged();
         }
 
         dirty
@@ -1128,22 +1150,23 @@ impl Display {
     #[inline(never)]
     fn draw_ime_preview(
         &mut self,
+        view: &mut PaneView,
         point: Point<usize>,
         fg: Rgb,
         bg: Rgb,
         rects: &mut Vec<RenderRect>,
         config: &UiConfig,
     ) {
-        let preedit = match self.ime.preedit() {
+        let preedit = match view.ime.preedit() {
             Some(preedit) => preedit,
             None => {
                 // In case we don't have preedit, just set the popup point.
-                self.window.update_ime_position(point, &self.size_info);
+                self.window.update_ime_position(point, &view.size_info);
                 return;
             },
         };
 
-        let num_cols = self.size_info.columns();
+        let num_cols = view.size_info.columns();
 
         // Get the visible preedit.
         let visible_text: String = match (preedit.cursor_byte_offset, preedit.cursor_end_offset) {
@@ -1175,20 +1198,20 @@ impl Display {
             fg,
             bg,
             visible_text.chars(),
-            &self.size_info,
+            &view.size_info,
             glyph_cache,
         );
 
         // Damage preedit inside the terminal viewport.
-        if point.line < self.size_info.screen_lines() {
+        if point.line < view.size_info.screen_lines() {
             let damage = LineDamageBounds::new(start.line, 0, num_cols);
-            self.damage_tracker.frame().damage_line(damage);
-            self.damage_tracker.next_frame().damage_line(damage);
+            view.damage_tracker.frame().damage_line(damage);
+            view.damage_tracker.next_frame().damage_line(damage);
         }
 
         // Add underline for preedit text.
         let underline = RenderLine { start, end, color: fg };
-        rects.extend(underline.rects(Flags::UNDERLINE, &metrics, &self.size_info));
+        rects.extend(underline.rects(Flags::UNDERLINE, &metrics, &view.size_info));
 
         let ime_popup_point = match preedit.cursor_end_offset {
             Some(cursor_end_offset) => {
@@ -1206,13 +1229,13 @@ impl Display {
                 );
                 let cursor_point = Point::new(point.line, cursor_column);
                 let cursor = RenderableCursor::new(cursor_point, shape, fg, width);
-                rects.extend(cursor.rects(&self.size_info, config.cursor.thickness()));
+                rects.extend(cursor.rects(&view.size_info, config.cursor.thickness()));
                 cursor_point
             },
             _ => end,
         };
 
-        self.window.update_ime_position(ime_popup_point, &self.size_info);
+        self.window.update_ime_position(ime_popup_point, &view.size_info);
     }
 
     /// Format search regex to account for the cursor and fullwidth characters.
@@ -1243,15 +1266,16 @@ impl Display {
     #[inline(never)]
     fn draw_hyperlink_preview(
         &mut self,
+        view: &mut PaneView,
         config: &UiConfig,
         cursor_point: Option<Point>,
         display_offset: usize,
     ) {
-        let num_cols = self.size_info.columns();
-        let uris: Vec<_> = self
+        let num_cols = view.size_info.columns();
+        let uris: Vec<_> = view
             .highlighted_hint
             .iter()
-            .chain(&self.vi_highlighted_hint)
+            .chain(&view.vi_highlighted_hint)
             .filter_map(|hint| hint.hyperlink().map(|hyperlink| hyperlink.uri()))
             .map(|uri| StrShortener::new(uri, num_cols, ShortenDirection::Right, Some(SHORTENER)))
             .collect();
@@ -1265,16 +1289,16 @@ impl Display {
 
         // Lines we shouldn't show preview on, because it'll obscure the highlighted hint.
         let mut protected_lines = Vec::with_capacity(max_protected_lines);
-        if self.size_info.screen_lines() > max_protected_lines {
+        if view.size_info.screen_lines() > max_protected_lines {
             // Prefer to show preview even when it'll likely obscure the highlighted hint, when
             // there's no place left for it.
-            protected_lines.push(self.hint_mouse_point.map(|point| point.line));
+            protected_lines.push(view.hint_mouse_point.map(|point| point.line));
             protected_lines.push(cursor_point.map(|point| point.line));
         }
 
         // Find the line in viewport we can draw preview on without obscuring protected lines.
-        let viewport_bottom = self.size_info.bottommost_line() - Line(display_offset as i32);
-        let viewport_top = viewport_bottom - (self.size_info.screen_lines() - 1);
+        let viewport_bottom = view.size_info.bottommost_line() - Line(display_offset as i32);
+        let viewport_top = viewport_bottom - (view.size_info.screen_lines() - 1);
         let uri_lines = (viewport_top.0..=viewport_bottom.0)
             .rev()
             .map(|line| Some(Line(line)))
@@ -1294,23 +1318,23 @@ impl Display {
         for (uri, point) in uris.into_iter().zip(uri_lines) {
             // Damage the uri preview.
             let damage = LineDamageBounds::new(point.line, point.column.0, num_cols);
-            self.damage_tracker.frame().damage_line(damage);
+            view.damage_tracker.frame().damage_line(damage);
 
             // Damage the uri preview for the next frame as well.
-            self.damage_tracker.next_frame().damage_line(damage);
+            view.damage_tracker.next_frame().damage_line(damage);
 
-            self.renderer.draw_string(point, fg, bg, uri, &self.size_info, &mut self.glyph_cache);
+            self.renderer.draw_string(point, fg, bg, uri, &view.size_info, &mut self.glyph_cache);
         }
     }
 
     /// Draw current search regex.
     #[inline(never)]
-    fn draw_search(&mut self, config: &UiConfig, text: &str) {
+    fn draw_search(&mut self, view: &mut PaneView, config: &UiConfig, text: &str) {
         // Assure text length is at least num_cols.
-        let num_cols = self.size_info.columns();
+        let num_cols = view.size_info.columns();
         let text = format!("{text:<num_cols$}");
 
-        let point = Point::new(self.size_info.screen_lines(), Column(0));
+        let point = Point::new(view.size_info.screen_lines(), Column(0));
 
         let fg = config.colors.footer_bar_foreground();
         let bg = config.colors.footer_bar_background();
@@ -1320,50 +1344,51 @@ impl Display {
             fg,
             bg,
             text.chars(),
-            &self.size_info,
+            &view.size_info,
             &mut self.glyph_cache,
         );
     }
 
     /// Draw render timer.
     #[inline(never)]
-    fn draw_render_timer(&mut self, config: &UiConfig) {
+    fn draw_render_timer(&mut self, view: &mut PaneView, config: &UiConfig) {
         if !config.debug.render_timer {
             return;
         }
 
         let timing = format!("{:.3} usec", self.meter.average());
-        let point = Point::new(self.size_info.screen_lines().saturating_sub(2), Column(0));
+        let point = Point::new(view.size_info.screen_lines().saturating_sub(2), Column(0));
         let fg = config.colors.primary.background;
         let bg = config.colors.normal.red;
 
         // Damage render timer for current and next frame.
         let damage = LineDamageBounds::new(point.line, point.column.0, timing.len());
-        self.damage_tracker.frame().damage_line(damage);
-        self.damage_tracker.next_frame().damage_line(damage);
+        view.damage_tracker.frame().damage_line(damage);
+        view.damage_tracker.next_frame().damage_line(damage);
 
         let glyph_cache = &mut self.glyph_cache;
-        self.renderer.draw_string(point, fg, bg, timing.chars(), &self.size_info, glyph_cache);
+        self.renderer.draw_string(point, fg, bg, timing.chars(), &view.size_info, glyph_cache);
     }
 
     /// Draw an indicator for the position of a line in history.
     #[inline(never)]
     fn draw_line_indicator(
         &mut self,
+        view: &mut PaneView,
         config: &UiConfig,
         total_lines: usize,
         obstructed_column: Option<Column>,
         line: usize,
     ) {
-        let columns = self.size_info.columns();
+        let columns = view.size_info.columns();
         let text = format!("[{}/{}]", line, total_lines - 1);
-        let column = Column(self.size_info.columns().saturating_sub(text.len()));
+        let column = Column(view.size_info.columns().saturating_sub(text.len()));
         let point = Point::new(0, column);
 
         // Damage the line indicator for current and next frame.
         let damage = LineDamageBounds::new(point.line, point.column.0, columns - 1);
-        self.damage_tracker.frame().damage_line(damage);
-        self.damage_tracker.next_frame().damage_line(damage);
+        view.damage_tracker.frame().damage_line(damage);
+        view.damage_tracker.next_frame().damage_line(damage);
 
         let colors = &config.colors;
         let fg = colors.line_indicator.foreground.unwrap_or(colors.primary.background);
@@ -1372,19 +1397,19 @@ impl Display {
         // Do not render anything if it would obscure the vi mode cursor.
         if obstructed_column.is_none_or(|obstructed_column| obstructed_column < column) {
             let glyph_cache = &mut self.glyph_cache;
-            self.renderer.draw_string(point, fg, bg, text.chars(), &self.size_info, glyph_cache);
+            self.renderer.draw_string(point, fg, bg, text.chars(), &view.size_info, glyph_cache);
         }
     }
 
     /// Highlight damaged rects.
     ///
     /// This function is for debug purposes only.
-    fn highlight_damage(&self, render_rects: &mut Vec<RenderRect>) {
-        for damage_rect in &self.damage_tracker.shape_frame_damage(self.size_info.into()) {
+    fn highlight_damage(&self, view: &mut PaneView, render_rects: &mut Vec<RenderRect>) {
+        for damage_rect in &view.damage_tracker.shape_frame_damage(view.size_info.into()) {
             let x = damage_rect.x as f32;
             let height = damage_rect.height as f32;
             let width = damage_rect.width as f32;
-            let y = damage_y_to_viewport_y(&self.size_info, damage_rect) as f32;
+            let y = damage_y_to_viewport_y(&view.size_info, damage_rect) as f32;
             let render_rect = RenderRect::new(x, y, width, height, DAMAGE_RECT_COLOR, 0.5);
 
             render_rects.push(render_rect);
@@ -1392,14 +1417,14 @@ impl Display {
     }
 
     /// Check whether a hint highlight needs to be cleared.
-    fn validate_hint_highlights(&mut self, display_offset: usize) {
-        let frame = self.damage_tracker.frame();
+    fn validate_hint_highlights(&mut self, view: &mut PaneView, display_offset: usize) {
+        let frame = view.damage_tracker.frame();
         let hints = [
-            (&mut self.highlighted_hint, &mut self.highlighted_hint_age, true),
-            (&mut self.vi_highlighted_hint, &mut self.vi_highlighted_hint_age, false),
+            (&mut view.highlighted_hint, &mut view.highlighted_hint_age, true),
+            (&mut view.vi_highlighted_hint, &mut view.vi_highlighted_hint_age, false),
         ];
 
-        let num_lines = self.size_info.screen_lines();
+        let num_lines = view.size_info.screen_lines();
         for (hint, hint_age, reset_mouse) in hints {
             let (start, end) = match hint {
                 Some(hint) => (*hint.bounds().start(), *hint.bounds().end()),
@@ -1418,7 +1443,7 @@ impl Display {
                 .unwrap_or_default();
             let end = term::point_to_viewport(display_offset, end)
                 .filter(|point| point.line < num_lines)
-                .unwrap_or_else(|| Point::new(num_lines - 1, self.size_info.last_column()));
+                .unwrap_or_else(|| Point::new(num_lines - 1, view.size_info.last_column()));
 
             // Clear invalidated hints.
             if frame.intersects(start, end) {

@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Write;
 use std::mem;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
@@ -18,7 +19,6 @@ use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::WindowId;
 
 use alacritty_terminal::event::Event as TerminalEvent;
-use alacritty_terminal::event_loop::Notifier;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Direction;
 use alacritty_terminal::term::test::TermSize;
@@ -27,9 +27,9 @@ use alacritty_terminal::term::{Term, TermMode};
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
-use crate::display::Display;
 use crate::display::window::Window;
-use crate::event::{ActionContext, Event, EventProxy, Mouse, SearchState, TouchPurpose};
+use crate::display::{Display, PaneView};
+use crate::event::{ActionContext, Event, EventProxy, Mouse, TouchPurpose};
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
@@ -78,8 +78,13 @@ impl WindowContext {
         }
         self.panes.remove(&pane_id);
         scheduler.unschedule_pane(self.id(), pane_id);
-        self.event_queue.retain(|event| !matches!(event, WinitEvent::UserEvent(event) if event.pane_id == Some(pane_id)));
+        self.event_queue.retain(|event| {
+            !matches!(event, WinitEvent::UserEvent(event) if event.pane_id == Some(pane_id))
+        });
         if self.focused == pane_id {
+            // Pointer/gesture state belongs to the previously focused terminal.
+            self.mouse = Mouse::default();
+            self.touch = TouchPurpose::default();
             self.focused = *self.panes.first_key_value().expect("surviving pane").0;
         }
         self.dirty = true;
@@ -130,9 +135,9 @@ impl WindowContext {
         let gl_context =
             renderer::platform::create_gl_context(&gl_display, &gl_config, raw_window_handle)?;
 
-        let display = Display::new(window, gl_context, &config, false)?;
+        let (display, pane_view) = Display::new(window, gl_context, &config, false)?;
 
-        Self::new(display, config, options, proxy)
+        Self::new(display, pane_view, config, options, proxy)
     }
 
     /// Create additional context with the graphics platform other windows are using.
@@ -170,9 +175,9 @@ impl WindowContext {
         let gl_context =
             renderer::platform::create_gl_context(&gl_display, gl_config, Some(raw_window_handle))?;
 
-        let display = Display::new(window, gl_context, &config, tabbed)?;
+        let (display, pane_view) = Display::new(window, gl_context, &config, tabbed)?;
 
-        let mut window_context = Self::new(display, config, options, proxy)?;
+        let mut window_context = Self::new(display, pane_view, config, options, proxy)?;
 
         // Set the config overrides at startup.
         //
@@ -185,6 +190,7 @@ impl WindowContext {
     /// Create a new terminal window context.
     fn new(
         display: Display,
+        pane_view: PaneView,
         config: Rc<UiConfig>,
         options: WindowOptions,
         proxy: EventLoopProxy<Event>,
@@ -212,7 +218,7 @@ impl WindowContext {
             context.focused,
             &context.config,
             &options,
-            context.display.size_info,
+            pane_view,
             context.display.window.id(),
             proxy,
         )?;
@@ -234,7 +240,7 @@ impl WindowContext {
         // Apply ipc config if there are overrides.
         self.config = self.window_config.override_config_rc(self.config.clone());
 
-        self.display.update_config(&self.config);
+        self.panes.get_mut(&self.focused).expect("focused pane").view.update_config(&self.config);
         self.focused_pane().terminal.lock().set_options(self.config.term_options());
 
         // Reload cursor if its thickness has changed.
@@ -293,7 +299,12 @@ impl WindowContext {
         self.display.window.set_blur(self.config.window.blur);
 
         // Update hint keys.
-        self.display.hint_state.update_alphabet(self.config.hints.alphabet());
+        self.panes
+            .get_mut(&self.focused)
+            .expect("focused pane")
+            .view
+            .hint_state
+            .update_alphabet(self.config.hints.alphabet());
 
         // Update cursor blinking.
         let event = Event::new(TerminalEvent::CursorBlinkingChange.into(), None);
@@ -343,10 +354,11 @@ impl WindowContext {
         self.dirty = false;
 
         // Force the display to process any pending display update.
-        self.display.process_renderer_update();
+        let pane = self.panes.get_mut(&self.focused).expect("focused pane");
+        self.display.process_renderer_update(&mut pane.view);
 
         // Request immediate re-draw if visual bell animation is not finished yet.
-        if !self.display.visual_bell.completed() {
+        if !pane.view.visual_bell.completed() {
             // We can get an OS redraw which bypasses alacritty's frame throttling, thus
             // marking the window as dirty when we don't have frame yet.
             if self.display.window.has_frame {
@@ -357,10 +369,9 @@ impl WindowContext {
         }
 
         // Redraw the window.
-        // Borrow fields separately so pane state and the shared display can be mutated together.
-        let pane = self.panes.get_mut(&self.focused).expect("focused pane");
         let terminal = pane.terminal.lock();
         self.display.draw(
+            &mut pane.view,
             terminal,
             scheduler,
             &self.message_buffer,
@@ -410,7 +421,8 @@ impl WindowContext {
                     continue;
                 },
             };
-            let mut terminal = pane.terminal.lock();
+            let terminal = Arc::clone(&pane.terminal);
+            let mut terminal = terminal.lock();
 
             let old_is_searching = pane.search_state.history_index.is_some();
 
@@ -424,6 +436,7 @@ impl WindowContext {
                 modifiers: &mut self.modifiers,
                 notifier: &mut pane.notifier,
                 display: &mut self.display,
+                pane_view: &mut pane.view,
                 mouse: &mut self.mouse,
                 touch: &mut self.touch,
                 dirty: &mut self.dirty,
@@ -452,9 +465,8 @@ impl WindowContext {
                 Self::submit_display_update(
                     &mut terminal,
                     &mut self.display,
-                    &mut pane.notifier,
+                    pane,
                     &self.message_buffer,
-                    &mut pane.search_state,
                     old_is_searching,
                     &self.config,
                 );
@@ -463,6 +475,7 @@ impl WindowContext {
 
             if self.dirty || self.mouse.hint_highlight_dirty {
                 self.dirty |= self.display.update_highlighted_hints(
+                    &mut pane.view,
                     &terminal,
                     &self.config,
                     &self.mouse,
@@ -497,7 +510,7 @@ impl WindowContext {
 
         let serialized_grid = json::to_string(&grid).expect("serialize grid");
 
-        let size_info = &self.display.size_info;
+        let size_info = &self.focused_pane().view.size_info;
         let size = TermSize::new(size_info.columns(), size_info.screen_lines());
         let serialized_size = json::to_string(&size).expect("serialize size");
 
@@ -520,9 +533,8 @@ impl WindowContext {
     fn submit_display_update(
         terminal: &mut Term<EventProxy>,
         display: &mut Display,
-        notifier: &mut Notifier,
+        pane: &mut Pane,
         message_buffer: &MessageBuffer,
-        search_state: &mut SearchState,
         old_is_searching: bool,
         config: &UiConfig,
     ) {
@@ -532,12 +544,19 @@ impl WindowContext {
         let origin_at_bottom = if terminal.mode().contains(TermMode::VI) {
             terminal.vi_mode_cursor.point.line == num_lines - 1
         } else {
-            search_state.direction == Direction::Left
+            pane.search_state.direction == Direction::Left
         };
 
-        display.handle_update(terminal, notifier, message_buffer, search_state, config);
+        display.handle_update(
+            &mut pane.view,
+            terminal,
+            &mut pane.notifier,
+            message_buffer,
+            &mut pane.search_state,
+            config,
+        );
 
-        let new_is_searching = search_state.history_index.is_some();
+        let new_is_searching = pane.search_state.history_index.is_some();
         if !old_is_searching && new_is_searching {
             // Scroll on search start to make sure origin is visible with minimal viewport motion.
             let display_offset = terminal.grid().display_offset();

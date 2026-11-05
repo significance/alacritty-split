@@ -21,7 +21,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// Process key input.
     pub fn key_input(&mut self, key: KeyEvent) {
         // IME input will be applied on commit and shouldn't trigger key bindings.
-        if self.ctx.display().ime.preedit().is_some() {
+        if self.ctx.pane_view().ime.preedit().is_some() {
             return;
         }
 
@@ -39,7 +39,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let text = key.text_with_all_modifiers().unwrap_or_default();
 
         // All key bindings are disabled while a hint is being selected.
-        if self.ctx.display().hint_state.active() {
+        if self.ctx.pane_view().hint_state.active() {
             for character in text.chars() {
                 self.ctx.hint_input(character);
             }
@@ -253,7 +253,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if !mode.contains(TermMode::REPORT_EVENT_TYPES)
             || mode.contains(TermMode::VI)
             || self.ctx.search_active()
-            || self.ctx.display().hint_state.active()
+            || self.ctx.pane_view().hint_state.active()
         {
             return;
         }

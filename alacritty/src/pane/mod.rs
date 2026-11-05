@@ -20,7 +20,7 @@ use alacritty_terminal::tty;
 
 use crate::cli::WindowOptions;
 use crate::config::UiConfig;
-use crate::display::SizeInfo;
+use crate::display::PaneView;
 use crate::event::{Event, EventProxy, InlineSearchState, SearchState};
 
 /// Stable identity of a pane within a window. Identities are never reused.
@@ -29,6 +29,7 @@ pub struct PaneId(pub u64);
 
 /// A terminal and its independent PTY session.
 pub struct Pane {
+    pub view: PaneView,
     pub terminal: Arc<FairMutex<Term<EventProxy>>>,
     pub notifier: Notifier,
     pub cursor_blink_timed_out: bool,
@@ -46,10 +47,11 @@ impl Pane {
         id: PaneId,
         config: &UiConfig,
         options: &WindowOptions,
-        size_info: SizeInfo,
+        view: PaneView,
         window_id: WindowId,
         proxy: EventLoopProxy<Event>,
     ) -> Result<Self, Box<dyn Error>> {
+        let size_info = view.size_info;
         let mut pty_config = config.pty_config();
         options.terminal_options.override_pty_config(&mut pty_config);
 
@@ -104,6 +106,7 @@ impl Pane {
         }
 
         Ok(Self {
+            view,
             terminal,
             notifier: Notifier(loop_tx),
             cursor_blink_timed_out: Default::default(),

@@ -56,7 +56,7 @@ use crate::daemon::spawn_daemon;
 use crate::display::color::Rgb;
 use crate::display::hint::HintMatch;
 use crate::display::window::{ImeInhibitor, Window};
-use crate::display::{Display, Preedit, SizeInfo};
+use crate::display::{Display, PaneView, Preedit, SizeInfo};
 use crate::input::{self, ActionContext as _, FONT_SIZE_STEP};
 use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
 use crate::message_bar::{Message, MessageBuffer};
@@ -547,9 +547,7 @@ impl Event {
     pub fn new<I: Into<Option<WindowId>>>(payload: EventType, window_id: I) -> Self {
         Self { window_id: window_id.into(), pane_id: None, payload }
     }
-}
 
-impl Event {
     /// Scope a window event to a particular terminal session.
     pub fn with_pane(mut self, pane_id: Option<PaneId>) -> Self {
         self.pane_id = pane_id;
@@ -694,6 +692,7 @@ pub struct ActionContext<'a, N, T> {
     pub touch: &'a mut TouchPurpose,
     pub modifiers: &'a mut Modifiers,
     pub display: &'a mut Display,
+    pub pane_view: &'a mut PaneView,
     pub message_buffer: &'a mut MessageBuffer,
     pub config: &'a UiConfig,
     pub cursor_blink_timed_out: &'a mut bool,
@@ -730,8 +729,9 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         Some(self.pane_id)
     }
 
+    #[inline]
     fn size_info(&self) -> SizeInfo {
-        self.display.size_info
+        self.pane_view.size_info
     }
 
     fn scroll(&mut self, scroll: Scroll) {
@@ -870,8 +870,8 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     #[inline]
-    fn display(&mut self) -> &mut Display {
-        self.display
+    fn pane_view(&mut self) -> &mut PaneView {
+        self.pane_view
     }
 
     #[inline]
@@ -1006,7 +1006,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         // Remove vi mode IME inhibitor, so the user can input the target character.
         self.window().set_ime_inhibitor(ImeInhibitor::VI, false);
 
-        self.display.damage_tracker.frame().mark_fully_damaged();
+        self.pane_view.damage_tracker.frame().mark_fully_damaged();
         self.display.pending_update.dirty = true;
     }
 
@@ -1237,7 +1237,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             self.schedule_blinking();
 
             // Mark the cursor as visible and queue redraw if the cursor was hidden.
-            if mem::take(&mut self.display.cursor_hidden) {
+            if mem::take(&mut self.pane_view.cursor_hidden) {
                 *self.dirty = true;
             }
         } else if *self.cursor_blink_timed_out {
@@ -1255,7 +1255,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
     /// Process a new character for keyboard hints.
     fn hint_input(&mut self, c: char) {
-        if let Some(hint) = self.display.hint_state.keyboard_input(self.terminal, c) {
+        if let Some(hint) = self.pane_view.hint_state.keyboard_input(self.terminal, c) {
             self.mouse.block_hint_launcher = false;
             self.trigger_hint(&hint);
         }
@@ -1450,7 +1450,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             // If we had search running when leaving Vi mode we should mark terminal fully damaged
             // to cleanup highlighted results.
             if self.search_state.dfas.take().is_some() {
-                self.display.damage_tracker.frame().mark_fully_damaged();
+                self.pane_view.damage_tracker.frame().mark_fully_damaged();
             }
         } else {
             self.clear_selection();
@@ -1645,7 +1645,7 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
         let vi_mode = self.terminal.mode().contains(TermMode::VI);
         self.window().set_ime_inhibitor(ImeInhibitor::VI, vi_mode);
 
-        self.display.damage_tracker.frame().mark_fully_damaged();
+        self.pane_view.damage_tracker.frame().mark_fully_damaged();
         self.display.pending_update.dirty = true;
         self.search_state.history_index = None;
 
@@ -1666,7 +1666,7 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
         let terminal_blinking = self.terminal.cursor_style().blinking;
         let mut blinking = cursor_style.blinking_override().unwrap_or(terminal_blinking);
         blinking &= (vi_mode || self.terminal().mode().contains(TermMode::SHOW_CURSOR))
-            && self.display().ime.preedit().is_none();
+            && self.pane_view().ime.preedit().is_none();
 
         // Update cursor blinking state.
         let window_id = self.display.window.id();
@@ -1682,7 +1682,7 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
             self.schedule_blinking();
             self.schedule_blinking_timeout();
         } else {
-            self.display.cursor_hidden = false;
+            self.pane_view.cursor_hidden = false;
             *self.dirty = true;
         }
     }
@@ -1886,7 +1886,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     // Only change state when timeout isn't reached, since we could get
                     // BlinkCursor and BlinkCursorTimeout events at the same time.
                     if !*self.ctx.cursor_blink_timed_out {
-                        self.ctx.display.cursor_hidden ^= true;
+                        self.ctx.pane_view.cursor_hidden ^= true;
                         *self.ctx.dirty = true;
                     }
                 },
@@ -1896,7 +1896,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         .with_pane(Some(self.ctx.pane_id));
                     self.ctx.scheduler.unschedule(timer_id);
                     *self.ctx.cursor_blink_timed_out = true;
-                    self.ctx.display.cursor_hidden = false;
+                    self.ctx.pane_view.cursor_hidden = false;
                     *self.ctx.dirty = true;
                 },
                 // Add message only if it's not already queued.
@@ -1924,7 +1924,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         }
 
                         // Ring visual bell.
-                        self.ctx.display.visual_bell.ring();
+                        self.ctx.pane_view.visual_bell.ring();
 
                         // Execute bell command.
                         if let Some(bell_command) = &self.ctx.config.bell.command {
@@ -1955,7 +1955,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             Some(color) => Rgb(color),
                             // Ignore cursor color requests unless it was changed.
                             None if index == NamedColor::Cursor as usize => return,
-                            None => self.ctx.display.colors[index],
+                            None => self.ctx.pane_view.colors[index],
                         };
                         self.ctx.write_to_pty(format(color.0).into_bytes());
                     },
@@ -2051,7 +2051,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     WindowEvent::CursorLeft { .. } => {
                         self.ctx.mouse.inside_text_area = false;
 
-                        if self.ctx.display().highlighted_hint.is_some() {
+                        if self.ctx.pane_view().highlighted_hint.is_some() {
                             *self.ctx.dirty = true;
                         }
                     },
@@ -2066,18 +2066,18 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             let preedit =
                                 (!text.is_empty()).then(|| Preedit::new(text, cursor_offset));
 
-                            if self.ctx.display.ime.preedit() != preedit.as_ref() {
-                                self.ctx.display.ime.set_preedit(preedit);
+                            if self.ctx.pane_view.ime.preedit() != preedit.as_ref() {
+                                self.ctx.pane_view.ime.set_preedit(preedit);
                                 self.ctx.update_cursor_blinking();
                                 *self.ctx.dirty = true;
                             }
                         },
                         Ime::Enabled => {
-                            self.ctx.display.ime.set_enabled(true);
+                            self.ctx.pane_view.ime.set_enabled(true);
                             *self.ctx.dirty = true;
                         },
                         Ime::Disabled => {
-                            self.ctx.display.ime.set_enabled(false);
+                            self.ctx.pane_view.ime.set_enabled(false);
                             *self.ctx.dirty = true;
                         },
                     },

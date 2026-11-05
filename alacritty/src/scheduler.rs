@@ -21,9 +21,7 @@ impl TimerId {
     pub fn new(topic: Topic, window_id: WindowId) -> Self {
         Self { topic, window_id, pane_id: None }
     }
-}
 
-impl TimerId {
     /// Leave frame timers window-scoped; all terminal timers carry a pane identity.
     pub fn with_pane(mut self, pane_id: Option<PaneId>) -> Self {
         self.pane_id = pane_id;

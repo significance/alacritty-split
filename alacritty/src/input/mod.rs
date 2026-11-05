@@ -43,7 +43,7 @@ use crate::config::{
 };
 use crate::display::hint::HintMatch;
 use crate::display::window::{ImeInhibitor, Window};
-use crate::display::{Display, SizeInfo};
+use crate::display::{PaneView, SizeInfo};
 use crate::event::{
     ClickState, Event, EventType, InlineSearchState, Mouse, TouchPurpose, TouchZoom,
 };
@@ -99,7 +99,7 @@ pub trait ActionContext<T: EventListener> {
     fn modifiers(&mut self) -> &mut Modifiers;
     fn scroll(&mut self, _scroll: Scroll) {}
     fn window(&mut self) -> &mut Window;
-    fn display(&mut self) -> &mut Display;
+    fn pane_view(&mut self) -> &mut PaneView;
     fn terminal(&self) -> &Term<T>;
     fn terminal_mut(&mut self) -> &mut Term<T>;
     fn spawn_new_instance(&mut self) {}
@@ -176,7 +176,7 @@ impl<T: EventListener> Execute<T> for Action {
             Action::Esc(s) => ctx.paste(s, false),
             Action::Command(program) => ctx.spawn_daemon(program.program(), program.args()),
             Action::Hint(hint) => {
-                ctx.display().hint_state.start(hint.clone());
+                ctx.pane_view().hint_state.start(hint.clone());
                 ctx.mark_dirty();
             },
             Action::ToggleViMode => {
@@ -206,12 +206,12 @@ impl<T: EventListener> Execute<T> for Action {
                 Self::toggle_selection(ctx, SelectionType::Semantic);
             },
             Action::Vi(ViAction::Open) => {
-                let hint = ctx.display().vi_highlighted_hint.take();
+                let hint = ctx.pane_view().vi_highlighted_hint.take();
                 if let Some(hint) = &hint {
                     ctx.mouse_mut().block_hint_launcher = false;
                     ctx.trigger_hint(hint);
                 }
-                ctx.display().vi_highlighted_hint = hint;
+                ctx.pane_view().vi_highlighted_hint = hint;
             },
             Action::Vi(ViAction::SearchNext) => {
                 ctx.on_typing_start();
@@ -711,11 +711,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         // Trigger hints highlighted by the mouse.
-        let hint = self.ctx.display().highlighted_hint.take();
+        let hint = self.ctx.pane_view().highlighted_hint.take();
         if let Some(hint) = hint.as_ref().filter(|_| button == MouseButton::Left) {
             self.ctx.trigger_hint(hint);
         }
-        self.ctx.display().highlighted_hint = hint;
+        self.ctx.pane_view().highlighted_hint = hint;
 
         let timer_id = TimerId::new(Topic::SelectionScrolling, self.ctx.window().id())
             .with_pane(self.ctx.pane_id());
@@ -1108,7 +1108,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         if let Some(mouse_state) = self.message_bar_cursor_state() {
             mouse_state
-        } else if self.ctx.display().highlighted_hint.as_ref().is_some_and(hint_highlighted) {
+        } else if self.ctx.pane_view().highlighted_hint.as_ref().is_some_and(hint_highlighted) {
             CursorIcon::Pointer
         } else if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
             CursorIcon::Default
@@ -1254,7 +1254,7 @@ mod tests {
             unimplemented!();
         }
 
-        fn display(&mut self) -> &mut Display {
+        fn pane_view(&mut self) -> &mut PaneView {
             unimplemented!();
         }
 
