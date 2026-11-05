@@ -1,5 +1,7 @@
 //! Independent terminal sessions within a native window.
 
+pub mod geometry;
+
 use std::error::Error;
 #[cfg(not(windows))]
 use std::os::unix::io::{AsRawFd, RawFd};

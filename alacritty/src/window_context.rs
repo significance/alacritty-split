@@ -368,6 +368,11 @@ impl WindowContext {
             }
         }
 
+        // Clear the native surface before the pane's scissored clear/draw.
+        if self.display.begin_frame(&self.config) {
+            pane.view.damage_tracker.frame().mark_fully_damaged();
+        }
+
         // Redraw the window.
         let terminal = pane.terminal.lock();
         self.display.draw(

@@ -51,7 +51,8 @@ use crate::display::hint::{HintMatch, HintState};
 use crate::display::meter::Meter;
 use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
-use crate::message_bar::{MessageBuffer, MessageType};
+use crate::message_bar::{Message, MessageBuffer, MessageType};
+use crate::pane::geometry::PaneRect;
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::{self, GlyphCache, Renderer, platform};
 use crate::scheduler::{Scheduler, TimerId, Topic};
@@ -373,6 +374,7 @@ pub struct Display {
 /// Per-terminal presentation state, owned by a pane rather than its native window.
 pub struct PaneView {
     pub size_info: SizeInfo,
+    pub rect: PaneRect,
 
     /// Hint highlighted by the mouse.
     pub highlighted_hint: Option<HintMatch>,
@@ -410,6 +412,12 @@ impl PaneView {
         let mut damage_tracker = DamageTracker::new(size_info.screen_lines(), size_info.columns());
         damage_tracker.debug = config.debug.highlight_damage;
         Self {
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: size_info.width() as u32,
+                height: size_info.height() as u32,
+            },
             size_info,
             damage_tracker,
             visual_bell: VisualBell::from(&config.bell),
@@ -496,7 +504,7 @@ impl Display {
         info!("Width: {}, Height: {}", size_info.width(), size_info.height());
 
         // Update OpenGL projection.
-        renderer.resize(&size_info);
+        renderer.resize(&size_info, (0, 0));
 
         // Clear screen.
         let background_color = config.colors.primary.background;
@@ -754,6 +762,8 @@ impl Display {
             // Clear focused search match.
             search_state.clear_focused_match();
         }
+        view.rect.width = new_size.width() as u32;
+        view.rect.height = new_size.height() as u32;
         view.size_info = new_size;
     }
 
@@ -777,7 +787,7 @@ impl Display {
 
         // Ensure we're modifying the correct OpenGL context.
         if self.make_current() {
-            self.renderer.resize(&view.size_info);
+            self.renderer.resize(&view.size_info, view.rect.gl_origin(self.window_size.height));
             view.damage_tracker.frame().mark_fully_damaged();
         }
 
@@ -785,10 +795,17 @@ impl Display {
             self.reset_glyph_cache();
         }
 
-        self.renderer.resize(&view.size_info);
+        self.renderer.resize(&view.size_info, view.rect.gl_origin(self.window_size.height));
 
         info!("Padding: {} x {}", view.size_info.padding_x(), view.size_info.padding_y());
         info!("Width: {}, Height: {}", view.size_info.width(), view.size_info.height());
+    }
+
+    /// Prepare the shared surface once before rendering its panes.
+    pub fn begin_frame(&mut self, config: &UiConfig) -> bool {
+        let reset = self.make_current();
+        self.renderer.clear_window(config.colors.primary.background, config.window_opacity());
+        reset
     }
 
     /// Draw the screen.
@@ -859,10 +876,11 @@ impl Display {
 
         // Make sure this window's OpenGL context is active.
         if self.make_current() {
-            self.renderer.resize(&view.size_info);
+            self.renderer.resize(&view.size_info, view.rect.gl_origin(self.window_size.height));
             view.damage_tracker.frame().mark_fully_damaged();
         }
 
+        self.renderer.begin_pane(&view.size_info, view.rect.gl_origin(self.window_size.height));
         self.renderer.clear(background_color, config.window_opacity());
         let mut lines = RenderLines::new();
 
@@ -876,7 +894,7 @@ impl Display {
 
             // Ensure macOS hasn't reset our viewport.
             #[cfg(target_os = "macos")]
-            self.renderer.set_viewport(&size_info);
+            self.renderer.set_viewport(&size_info, view.rect.gl_origin(self.window_size.height));
 
             let glyph_cache = &mut self.glyph_cache;
             let highlighted_hint = &view.highlighted_hint;
@@ -989,51 +1007,14 @@ impl Display {
             }
         }
 
+        self.renderer.draw_rects(
+            &size_info,
+            view.rect.gl_origin(self.window_size.height),
+            &metrics,
+            rects,
+        );
         if let Some(message) = message_buffer.message() {
-            let search_offset = usize::from(search_state.regex().is_some());
-            let text = message.text(&size_info);
-
-            // Create a new rectangle for the background.
-            let start_line = size_info.screen_lines() + search_offset;
-            let y = size_info.cell_height().mul_add(start_line as f32, size_info.padding_y());
-
-            let bg = match message.ty() {
-                MessageType::Error => config.colors.normal.red,
-                MessageType::Warning => config.colors.normal.yellow,
-            };
-
-            let x = 0;
-            let width = size_info.width() as i32;
-            let height = (size_info.height() - y) as i32;
-            let message_bar_rect =
-                RenderRect::new(x as f32, y, width as f32, height as f32, bg, 1.);
-
-            // Push message_bar in the end, so it'll be above all other content.
-            rects.push(message_bar_rect);
-
-            // Always damage message bar, since it could have messages of the same size in it.
-            view.damage_tracker.frame().add_viewport_rect(&size_info, x, y as i32, width, height);
-
-            // Draw rectangles.
-            self.renderer.draw_rects(&size_info, &metrics, rects);
-
-            // Relay messages to the user.
-            let glyph_cache = &mut self.glyph_cache;
-            let fg = config.colors.primary.background;
-            for (i, message_text) in text.iter().enumerate() {
-                let point = Point::new(start_line + i, Column(0));
-                self.renderer.draw_string(
-                    point,
-                    fg,
-                    bg,
-                    message_text.chars(),
-                    &size_info,
-                    glyph_cache,
-                );
-            }
-        } else {
-            // Draw rectangles.
-            self.renderer.draw_rects(&size_info, &metrics, rects);
+            self.draw_message_bar(view, message, config);
         }
 
         self.draw_render_timer(view, config);
@@ -1052,8 +1033,15 @@ impl Display {
             let damage = view.damage_tracker.shape_frame_damage(view.size_info.into());
             let mut rects = Vec::with_capacity(damage.len());
             self.highlight_damage(view, &mut rects);
-            self.renderer.draw_rects(&view.size_info, &metrics, rects);
+            self.renderer.draw_rects(
+                &view.size_info,
+                view.rect.gl_origin(self.window_size.height),
+                &metrics,
+                rects,
+            );
         }
+
+        self.renderer.end_pane();
 
         // Clearing debug highlights from the previous frame requires full redraw.
         self.swap_buffers(view);
@@ -1072,6 +1060,48 @@ impl Display {
         }
 
         view.damage_tracker.swap_damage();
+    }
+
+    /// Messages cover the native window, independent of pane origin or clipping.
+    fn draw_message_bar(&mut self, view: &mut PaneView, message: &Message, config: &UiConfig) {
+        let padding = config.window.padding(self.window.scale_factor as f32);
+        let mut size = SizeInfo::new(
+            self.window_size.width as f32,
+            self.window_size.height as f32,
+            view.size_info.cell_width(),
+            view.size_info.cell_height(),
+            padding.0,
+            padding.1,
+            config.window.dynamic_padding,
+        );
+        let text = message.text(&size);
+        size.reserve_lines(text.len());
+        let start_line = size.screen_lines();
+        let y = size.cell_height().mul_add(start_line as f32, size.padding_y());
+        let bg = match message.ty() {
+            MessageType::Error => config.colors.normal.red,
+            MessageType::Warning => config.colors.normal.yellow,
+        };
+        let width = size.width() as i32;
+        let height = (size.height() - y) as i32;
+        let rect = RenderRect::new(0., y, width as f32, height as f32, bg, 1.);
+        view.damage_tracker.frame().add_viewport_rect(&size, 0, y as i32, width, height);
+
+        self.renderer.end_pane();
+        self.renderer.resize(&size, (0, 0));
+        let metrics = self.glyph_cache.font_metrics();
+        self.renderer.draw_rects(&size, (0, 0), &metrics, vec![rect]);
+        for (i, text) in text.iter().enumerate() {
+            self.renderer.draw_string(
+                Point::new(start_line + i, Column(0)),
+                config.colors.primary.background,
+                bg,
+                text.chars(),
+                &size,
+                &mut self.glyph_cache,
+            );
+        }
+        self.renderer.begin_pane(&view.size_info, view.rect.gl_origin(self.window_size.height));
     }
 
     /// Update the mouse/vi mode cursor hint highlighting.

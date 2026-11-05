@@ -92,6 +92,29 @@ pub struct Renderer {
     robustness: bool,
 }
 
+/// Pure viewport/scissor calculation shared by text, rectangle and clear operations.
+#[derive(Debug, PartialEq, Eq)]
+struct PaneViewport {
+    text: [i32; 4],
+    bounds: [i32; 4],
+}
+
+impl PaneViewport {
+    fn new(size: &SizeInfo, origin: (i32, i32)) -> Self {
+        let (width, height) = (size.width() as i32, size.height() as i32);
+        let (padding_x, padding_y) = (size.padding_x() as i32, size.padding_y() as i32);
+        Self {
+            bounds: [origin.0, origin.1, width, height],
+            text: [
+                origin.0 + padding_x,
+                origin.1 + padding_y,
+                width - 2 * padding_x,
+                height - 2 * padding_y,
+            ],
+        }
+    }
+}
+
 /// Wrapper around gl::GetString with error checking and reporting.
 fn gl_get_string(
     string_id: gl::types::GLenum,
@@ -240,7 +263,13 @@ impl Renderer {
     }
 
     /// Draw all rectangles simultaneously to prevent excessive program swaps.
-    pub fn draw_rects(&mut self, size_info: &SizeInfo, metrics: &Metrics, rects: Vec<RenderRect>) {
+    pub fn draw_rects(
+        &mut self,
+        size_info: &SizeInfo,
+        origin: (i32, i32),
+        metrics: &Metrics,
+        rects: Vec<RenderRect>,
+    ) {
         if rects.is_empty() {
             return;
         }
@@ -248,7 +277,7 @@ impl Renderer {
         // Prepare rect rendering state.
         unsafe {
             // Remove padding from viewport.
-            gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
+            gl::Viewport(origin.0, origin.1, size_info.width() as i32, size_info.height() as i32);
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
         }
 
@@ -260,11 +289,35 @@ impl Renderer {
             gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
 
             // Restore viewport with padding.
-            self.set_viewport(size_info);
+            self.set_viewport(size_info, origin);
         }
     }
 
-    /// Fill the window with `color` and `alpha`.
+    /// Clear the native window once, before any pane draws.
+    pub fn clear_window(&self, color: Rgb, alpha: f32) {
+        unsafe {
+            gl::Disable(gl::SCISSOR_TEST);
+        }
+        self.clear(color, alpha);
+    }
+
+    /// Clip text, rectangles and clears to one pane and use its local projection.
+    pub fn begin_pane(&self, size: &SizeInfo, origin: (i32, i32)) {
+        let [x, y, width, height] = PaneViewport::new(size, origin).bounds;
+        unsafe {
+            gl::Enable(gl::SCISSOR_TEST);
+            gl::Scissor(x, y, width, height);
+        }
+        self.resize(size, origin);
+    }
+
+    pub fn end_pane(&self) {
+        unsafe {
+            gl::Disable(gl::SCISSOR_TEST);
+        }
+    }
+
+    /// Fill the current scissored region with `color` and `alpha`.
     pub fn clear(&self, color: Rgb, alpha: f32) {
         unsafe {
             gl::ClearColor(
@@ -328,20 +381,16 @@ impl Renderer {
 
     /// Set the viewport for cell rendering.
     #[inline]
-    pub fn set_viewport(&self, size: &SizeInfo) {
+    pub fn set_viewport(&self, size: &SizeInfo, origin: (i32, i32)) {
+        let [x, y, width, height] = PaneViewport::new(size, origin).text;
         unsafe {
-            gl::Viewport(
-                size.padding_x() as i32,
-                size.padding_y() as i32,
-                size.width() as i32 - 2 * size.padding_x() as i32,
-                size.height() as i32 - 2 * size.padding_y() as i32,
-            );
+            gl::Viewport(x, y, width, height);
         }
     }
 
     /// Resize the renderer.
-    pub fn resize(&self, size_info: &SizeInfo) {
-        self.set_viewport(size_info);
+    pub fn resize(&self, size_info: &SizeInfo, origin: (i32, i32)) {
+        self.set_viewport(size_info, origin);
         match &self.text_renderer {
             TextRendererProvider::Gles2(renderer) => renderer.resize(size_info),
             TextRendererProvider::Glsl3(renderer) => renderer.resize(size_info),
@@ -397,4 +446,28 @@ extern "system" fn gl_debug_log(
 ) {
     let msg = unsafe { CStr::from_ptr(msg).to_string_lossy() };
     debug!("[gl_render] {msg}");
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use crate::pane::geometry::PaneRect;
+
+    #[test]
+    fn single_pane_preserves_original_padding_and_full_surface_scissor() {
+        let size = SizeInfo::new(800., 600., 8., 16., 3., 4., false);
+        let rect = PaneRect { x: 0, y: 0, width: 800, height: 600 };
+        let viewport = PaneViewport::new(&size, rect.gl_origin(600));
+        assert_eq!(viewport.text, [3, 4, 794, 592]);
+        assert_eq!(viewport.bounds, [0, 0, 800, 600]);
+    }
+
+    #[test]
+    fn offset_pane_uses_local_dimensions_for_text_and_rectangles() {
+        let size = SizeInfo::new(398., 198., 8., 16., 3., 4., false);
+        let rect = PaneRect { x: 402, y: 102, width: 398, height: 198 };
+        let viewport = PaneViewport::new(&size, rect.gl_origin(600));
+        assert_eq!(viewport.text, [405, 304, 392, 190]);
+        assert_eq!(viewport.bounds, [402, 300, 398, 198]);
+    }
 }
