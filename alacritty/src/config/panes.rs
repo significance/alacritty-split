@@ -43,6 +43,10 @@ impl Panes {
         Self::physical_thickness(self.padding, scale) as f32
     }
 
+    pub fn focused_edge_color(&self) -> Rgb {
+        self.focused_edge_color.unwrap_or(Rgb::new(0, 0, 0))
+    }
+
     pub fn divider_color(&self, foreground: Rgb, background: Rgb) -> Rgb {
         self.divider_color.unwrap_or_else(|| {
             Rgb::new(

@@ -1207,7 +1207,7 @@ impl Display {
             0.,
             false,
         );
-        let color = config.panes.focused_edge_color.unwrap_or(config.colors.primary.foreground);
+        let color = config.panes.focused_edge_color();
         let muted = config
             .panes
             .divider_color(config.colors.primary.foreground, config.colors.primary.background);

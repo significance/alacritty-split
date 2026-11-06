@@ -5,6 +5,6 @@ padding = 1
 # Integer logical pixels, scaled with display DPI. Zero hides the corresponding border.
 divider_thickness = 1
 focused_edge_thickness = 1
-# Omit colors to follow the terminal theme.
+# Omit divider_color to follow the terminal theme; focus edges default to black.
 # divider_color = "#404040"
-# focused_edge_color = "#88c0d0"
+# focused_edge_color = "#000000"

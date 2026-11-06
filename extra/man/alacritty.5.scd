@@ -248,7 +248,7 @@ Changes apply to existing panes on config reload.
 
 *focused_edge_color* = _"#RRGGBB"_
 
-	Focused border colour. Defaults to the primary foreground when omitted.
+	Focused border colour. Defaults to black (_"#000000"_) when omitted.
 
 Example:
 
@@ -258,7 +258,7 @@ padding = 1
 divider_thickness = 1
 focused_edge_thickness = 1
 # divider_color = "#404040"
-# focused_edge_color = "#88c0d0"
+# focused_edge_color = "#000000"
 ```
 
 # SCROLLING
