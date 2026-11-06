@@ -45,24 +45,24 @@ padding = 1
 divider_thickness = 1
 focused_edge_thickness = 1
 # divider_color = "#404040"
-# focused_edge_color = "#000000"
+# focused_edge_color = "#4b2070"
 ```
 
 Thicknesses are integer logical pixels. Zero hides the corresponding border; a zero-width
 divider cannot be dragged. Omitted divider colors blend foreground/background 1:3;
-omitted focused-edge colors use black (`#000000`). Settings reload live.
+omitted focused-edge colors use dark purple (`#4b2070`). Settings reload live.
 See [the example](../extra/panes.toml) and `alacritty(5)` for details.
 
-A theme can give the active pane a dark-purple outline instead:
+A theme can give the active pane a different outline:
 
 ```toml
 [panes]
-focused_edge_color = "#4b2070"
+focused_edge_color = "#88c0d0"
 ```
 
 Include this table in your theme file alongside its `[colors]` tables. The active pane
-gets this outline; inactive panes retain the muted divider colour. Black is subtle on
-a dark background and more visible on a light one.
+gets this outline; inactive panes retain the muted divider colour. The dark-purple
+default reads on both dark and light backgrounds.
 
 `window.resize_increments` keeps its normal behavior for one pane. Cell snapping is
 disabled while multiple panes exist, since those panes have different grids, and restored

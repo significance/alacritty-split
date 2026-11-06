@@ -27,6 +27,9 @@ impl Default for Panes {
 }
 
 impl Panes {
+    /// Dark purple by default, visible on both dark and light themes.
+    pub const DEFAULT_FOCUSED_EDGE_COLOR: Rgb = Rgb::new(0x4b, 0x20, 0x70);
+
     pub fn physical_thickness(logical: u16, scale: f32) -> u32 {
         if logical == 0 { 0 } else { (f32::from(logical) * scale).round().max(1.) as u32 }
     }
@@ -44,7 +47,7 @@ impl Panes {
     }
 
     pub fn focused_edge_color(&self) -> Rgb {
-        self.focused_edge_color.unwrap_or(Rgb::new(0, 0, 0))
+        self.focused_edge_color.unwrap_or(Self::DEFAULT_FOCUSED_EDGE_COLOR)
     }
 
     pub fn divider_color(&self, foreground: Rgb, background: Rgb) -> Rgb {
@@ -71,6 +74,8 @@ mod tests {
         assert_eq!(config.panes.padding_pixels(2.), 2.);
         assert_eq!(config.panes.divider_pixels(1.), 1);
         assert_eq!(config.panes.edge_pixels(2.), 2);
+        assert_eq!(config.panes.focused_edge_color, None);
+        assert_eq!(config.panes.focused_edge_color(), Rgb::new(0x4b, 0x20, 0x70));
         assert_eq!(
             config.panes.divider_color(Rgb::new(200, 100, 60), Rgb::new(0, 0, 0)),
             Rgb::new(50, 25, 15)
@@ -95,5 +100,6 @@ focused_edge_color = "#abcdef"
         assert_eq!(config.panes.edge_pixels(2.), 0);
         assert_eq!(config.panes.divider_color, Some(Rgb::new(0x12, 0x34, 0x56)));
         assert_eq!(config.panes.focused_edge_color, Some(Rgb::new(0xab, 0xcd, 0xef)));
+        assert_eq!(config.panes.focused_edge_color(), Rgb::new(0xab, 0xcd, 0xef));
     }
 }
