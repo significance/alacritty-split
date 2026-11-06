@@ -21,7 +21,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Click-to-focus panes, draggable dividers, and pane-relative IME candidate placement
 - Hovered-pane scrolling without changing keyboard focus
 - Configurable pane padding, divider styles, and focused borders under `[panes]`
-- Two logical pixels of extra padding inside each split pane by default
+- One logical pixel of extra padding inside each split pane by default
 - macOS Cmd+D and Cmd+Shift+D split shortcuts; Cmd+W closes the focused pane
 
 ### Changed

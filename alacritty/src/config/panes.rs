@@ -17,7 +17,7 @@ pub struct Panes {
 impl Default for Panes {
     fn default() -> Self {
         Self {
-            padding: 2,
+            padding: 1,
             divider_thickness: 1,
             divider_color: None,
             focused_edge_thickness: 1,
@@ -60,11 +60,11 @@ mod tests {
     use crate::config::UiConfig;
 
     #[test]
-    fn default_pane_style_preserves_borders_and_adds_two_pixel_padding() {
+    fn default_pane_style_preserves_borders_and_adds_one_pixel_padding() {
         let config: UiConfig = toml::from_str("").unwrap();
         assert_eq!(config.panes, Panes::default());
-        assert_eq!(config.panes.padding_pixels(1.), 2.);
-        assert_eq!(config.panes.padding_pixels(2.), 4.);
+        assert_eq!(config.panes.padding_pixels(1.), 1.);
+        assert_eq!(config.panes.padding_pixels(2.), 2.);
         assert_eq!(config.panes.divider_pixels(1.), 1);
         assert_eq!(config.panes.edge_pixels(2.), 2);
         assert_eq!(

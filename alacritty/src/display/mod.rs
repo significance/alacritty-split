@@ -1913,7 +1913,7 @@ mod pane_size_tests {
     }
 
     #[test]
-    fn split_padding_is_two_logical_pixels_and_single_pane_padding_is_unchanged() {
+    fn split_padding_is_one_logical_pixel_and_single_pane_padding_is_unchanged() {
         let config = UiConfig::default();
         let mut pane = view(800, 600, &config);
         let messages = MessageBuffer::default();
@@ -1921,10 +1921,10 @@ mod pane_size_tests {
         let single = pane.size_for_rect((8., 16.), &config, 1., &messages, &search);
         pane.is_split = true;
         let split = pane.size_for_rect((8., 16.), &config, 1., &messages, &search);
-        assert_eq!((split.padding_x(), split.padding_y()), (2., 2.));
+        assert_eq!((split.padding_x(), split.padding_y()), (1., 1.));
         assert_eq!(split.columns(), 99);
         let retina = pane.size_for_rect((16., 32.), &config, 2., &messages, &search);
-        assert_eq!((retina.padding_x(), retina.padding_y()), (4., 4.));
+        assert_eq!((retina.padding_x(), retina.padding_y()), (2., 2.));
         pane.is_split = false;
         assert_eq!(pane.size_for_rect((8., 16.), &config, 1., &messages, &search), single);
     }

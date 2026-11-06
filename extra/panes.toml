@@ -1,7 +1,7 @@
 # Import this file or copy its table into your Alacritty config.
 [panes]
 # Extra padding per side in split panes; single-pane padding is unchanged.
-padding = 2
+padding = 1
 # Integer logical pixels, scaled with display DPI. Zero hides the corresponding border.
 divider_thickness = 1
 focused_edge_thickness = 1

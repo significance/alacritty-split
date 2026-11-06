@@ -35,13 +35,13 @@ separate `target/release/osx/Alacritty.app` bundle.
 
 ## Appearance
 
-Each split pane gets two logical pixels of extra padding on every side, scaled for
+Each split pane gets one logical pixel of extra padding on every side, scaled for
 Retina/high-DPI displays. This adds to `window.padding` and disappears when only one pane
 remains. Configure it in the regular Alacritty TOML file:
 
 ```toml
 [panes]
-padding = 2
+padding = 1
 divider_thickness = 1
 focused_edge_thickness = 1
 # divider_color = "#404040"

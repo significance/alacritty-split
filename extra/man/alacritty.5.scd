@@ -226,7 +226,7 @@ Changes apply to existing panes on config reload.
 	Extra inset on every side of each split pane, added to *window.padding*.
 	It applies only while multiple panes exist. Single-pane padding is unchanged.
 
-	Default: _2_
+	Default: _1_
 
 *divider_thickness* = _<integer>_
 
@@ -254,7 +254,7 @@ Example:
 
 ```
 [panes]
-padding = 2
+padding = 1
 divider_thickness = 1
 focused_edge_thickness = 1
 # divider_color = "#404040"
