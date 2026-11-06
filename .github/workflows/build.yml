@@ -1,0 +1,87 @@
+name: Build
+
+# Builds installable binaries of the splits fork on every push to the work branch
+# and publishes them as workflow artifacts plus a rolling "splits-latest" pre-release.
+
+on:
+  push:
+    branches: ["splits"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: splits-latest
+
+jobs:
+  macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install scdoc
+      - name: Install targets
+        run: rustup update && rustup target add aarch64-apple-darwin && rustup target add x86_64-apple-darwin
+      - name: Make universal DMG
+        run: make dmg-universal
+      - name: Name artifacts
+        run: |
+          SHORT=${GITHUB_SHA::8}
+          cp ./target/release/osx/Alacritty.dmg "./Alacritty-splits-${SHORT}-macos-universal.dmg"
+          (cd ./target/release/osx && zip -qry "../../../Alacritty-splits-${SHORT}-macos-universal.app.zip" Alacritty.app)
+          ls -la Alacritty-splits-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Alacritty-macos-universal
+          path: |
+            Alacritty-splits-*-macos-universal.dmg
+            Alacritty-splits-*-macos-universal.app.zip
+          if-no-files-found: error
+      - name: Publish rolling pre-release
+        run: |
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "splits branch, latest build (${GITHUB_SHA::8})" \
+            --notes "Automated build of the splits branch at ${GITHUB_SHA}. macOS: open the .dmg or unzip Alacritty.app. Unsigned (ad-hoc): on first launch right-click > Open, or run 'xattr -dr com.apple.quarantine /Applications/Alacritty.app'." \
+            Alacritty-splits-*-macos-universal.dmg \
+            Alacritty-splits-*-macos-universal.app.zip
+
+  linux:
+    runs-on: ubuntu-latest
+    needs: macos
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install cmake pkg-config libfreetype6-dev libfontconfig1-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev python3 scdoc
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: |
+          SHORT=${GITHUB_SHA::8}
+          PKG="Alacritty-splits-${SHORT}-linux-x86_64"
+          mkdir -p "$PKG/man"
+          cp target/release/alacritty "$PKG/"
+          cp extra/alacritty.info extra/linux/Alacritty.desktop extra/logo/alacritty-term.svg "$PKG/"
+          cp -r extra/completions "$PKG/"
+          for m in alacritty.1 alacritty-msg.1 alacritty.5 alacritty-bindings.5 alacritty-escapes.7; do
+            scdoc < "extra/man/$m.scd" | gzip -c > "$PKG/man/$m.gz"
+          done
+          tar czf "$PKG.tar.gz" "$PKG"
+          ls -la "$PKG.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Alacritty-linux-x86_64
+          path: Alacritty-splits-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+      - name: Attach to rolling pre-release
+        run: gh release upload "$RELEASE_TAG" Alacritty-splits-*-linux-x86_64.tar.gz --clobber
