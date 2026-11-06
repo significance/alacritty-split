@@ -113,6 +113,9 @@ pub trait ActionContext<T: EventListener> {
     fn reset_font_size(&mut self) {}
     fn pop_message(&mut self) {}
     fn message(&self) -> Option<&Message>;
+    fn window_message_bar_handled(&self) -> bool {
+        false
+    }
     fn config(&self) -> &UiConfig;
     #[cfg(target_os = "macos")]
     fn event_loop(&self) -> &ActiveEventLoop;
@@ -1095,6 +1098,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Check mouse icon state in relation to the message bar.
     fn message_bar_cursor_state(&self) -> Option<CursorIcon> {
+        if self.ctx.window_message_bar_handled() {
+            return None;
+        }
         // Since search is above the message bar, the button is offset by search's height.
         let search_height = usize::from(self.ctx.search_active());
 
@@ -1203,11 +1209,16 @@ mod tests {
         pub message_buffer: &'a mut MessageBuffer,
         pub modifiers: Modifiers,
         config: &'a UiConfig,
+        window_message_bar_handled: bool,
         pane_commands: Vec<PaneCommand>,
         inline_search_state: &'a mut InlineSearchState,
     }
 
     impl<T: EventListener> super::ActionContext<T> for ActionContext<'_, T> {
+        fn window_message_bar_handled(&self) -> bool {
+            self.window_message_bar_handled
+        }
+
         fn pane_command(&mut self, command: PaneCommand) {
             self.pane_commands.push(command);
         }
@@ -1315,6 +1326,34 @@ mod tests {
     }
 
     #[test]
+    fn upper_pane_padding_is_not_a_window_message_bar() {
+        let cfg = UiConfig::default();
+        let size = SizeInfo::new(200., 100., 8., 16., 4., 4., false);
+        let mut terminal = Term::new(cfg.term_options(), &size, MockEventProxy);
+        let mut mouse = Mouse { x: 190, y: 90, ..Mouse::default() };
+        let mut clipboard = Clipboard::new_nop();
+        let mut messages = MessageBuffer::default();
+        messages.push(Message::new("warning".into(), crate::message_bar::MessageType::Warning));
+        let mut inline = InlineSearchState::default();
+        let context = ActionContext {
+            terminal: &mut terminal,
+            size_info: &size,
+            mouse: &mut mouse,
+            clipboard: &mut clipboard,
+            message_buffer: &mut messages,
+            modifiers: Modifiers::default(),
+            config: &cfg,
+            inline_search_state: &mut inline,
+            pane_commands: Vec::new(),
+            window_message_bar_handled: false,
+        };
+        let mut processor = Processor::new(context);
+        assert!(processor.message_bar_cursor_state().is_some());
+        processor.ctx.window_message_bar_handled = true;
+        assert_eq!(processor.message_bar_cursor_state(), None);
+    }
+
+    #[test]
     fn pane_actions_enqueue_window_commands() {
         let cfg = UiConfig::default();
         let size = SizeInfo::new(800., 600., 8., 16., 0., 0., false);
@@ -1333,6 +1372,7 @@ mod tests {
             config: &cfg,
             inline_search_state: &mut inline,
             pane_commands: Vec::new(),
+            window_message_bar_handled: false,
         };
         let cases = [
             (Action::SplitVertical, PaneCommand::Split(Orientation::Vertical)),
@@ -1394,6 +1434,7 @@ mod tests {
                     message_buffer: &mut message_buffer,
                     inline_search_state: &mut inline_search_state,
                     pane_commands: Vec::new(),
+            window_message_bar_handled: false,
                     config: &cfg,
                 };
 

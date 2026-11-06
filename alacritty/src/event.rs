@@ -688,6 +688,8 @@ pub struct ActionContext<'a, N, T> {
     pub pane_commands: &'a mut Vec<PaneCommand>,
     pub pane_title: &'a mut Option<String>,
     pub is_active_pane: bool,
+    pub window_focused: &'a mut bool,
+    pub window_message_bar_handled: bool,
     pub notifier: &'a mut N,
     pub terminal: &'a mut Term<T>,
     pub clipboard: &'a mut Clipboard,
@@ -717,6 +719,10 @@ pub struct ActionContext<'a, N, T> {
 
 impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionContext<'a, N, T> {
     #[inline]
+    fn window_message_bar_handled(&self) -> bool {
+        self.window_message_bar_handled
+    }
+
     fn pane_command(&mut self, command: PaneCommand) {
         self.pane_commands.push(command);
     }
@@ -1933,7 +1939,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     },
                     TerminalEvent::Bell => {
                         // Set window urgency hint when window is not focused.
-                        let focused = self.ctx.terminal.is_focused;
+                        let focused = *self.ctx.window_focused;
                         if !focused && self.ctx.terminal.mode().contains(TermMode::URGENCY_HINTS) {
                             self.ctx.window().set_urgent(true);
                         }
@@ -2041,6 +2047,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     },
                     WindowEvent::Touch(touch) => self.touch(touch),
                     WindowEvent::Focused(is_focused) => {
+                        *self.ctx.window_focused = is_focused;
                         self.ctx.terminal.is_focused = is_focused;
 
                         // When the unfocused hollow is used we must redraw on focus change.

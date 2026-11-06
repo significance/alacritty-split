@@ -350,6 +350,7 @@ pub struct Display {
     /// Shared font metrics; every pane uses the same cell dimensions.
     cell_size: (f32, f32),
     minimum_window_size: Option<PhysicalSize<u32>>,
+    resize_increments: Option<PhysicalSize<f32>>,
 
     pub raw_window_handle: RawWindowHandle,
 
@@ -378,6 +379,8 @@ pub struct Display {
 
 /// Per-terminal presentation state, owned by a pane rather than its native window.
 pub struct PaneView {
+    /// Extra configured pane padding applies only while this view belongs to a split.
+    pub is_split: bool,
     pub size_info: SizeInfo,
     pub rect: PaneRect,
 
@@ -417,6 +420,7 @@ impl PaneView {
         let mut damage_tracker = DamageTracker::new(size_info.screen_lines(), size_info.columns());
         damage_tracker.debug = config.debug.highlight_damage;
         Self {
+            is_split: false,
             rect: PaneRect {
                 x: 0,
                 y: 0,
@@ -447,7 +451,12 @@ impl PaneView {
         message_buffer: &MessageBuffer,
         search_state: &SearchState,
     ) -> SizeInfo {
-        let padding = config.window.padding(scale_factor);
+        let mut padding = config.window.padding(scale_factor);
+        if self.is_split {
+            let extra = config.panes.padding_pixels(scale_factor);
+            padding.0 += extra;
+            padding.1 += extra;
+        }
         let mut size = SizeInfo::new(
             self.rect.width as f32,
             self.rect.height as f32,
@@ -554,7 +563,7 @@ impl Display {
 
         // Set resize increments for the newly created window.
         if config.window.resize_increments {
-            window.set_resize_increments(PhysicalSize::new(cell_width, cell_height));
+            window.set_resize_increments(Some(PhysicalSize::new(cell_width, cell_height)));
         }
 
         window.set_visible(true);
@@ -595,6 +604,10 @@ impl Display {
                 window_size: viewport_size,
                 cell_size: (cell_width, cell_height),
                 minimum_window_size: None,
+                resize_increments: config
+                    .window
+                    .resize_increments
+                    .then_some(PhysicalSize::new(cell_width, cell_height)),
                 pending_renderer_update: Default::default(),
                 pending_update: Default::default(),
                 meter: Default::default(),
@@ -722,11 +735,20 @@ impl Display {
                 self.window_size = dimensions;
             }
         }
-        if config.window.resize_increments {
-            self.window
-                .set_resize_increments(PhysicalSize::new(self.cell_size.0, self.cell_size.1));
-        }
         invalidate
+    }
+
+    /// Cell snapping only describes a single terminal grid.
+    pub fn update_resize_increments(&mut self, config: &UiConfig, multiple_panes: bool) {
+        let increments = if config.window.resize_increments && !multiple_panes {
+            Some(PhysicalSize::new(self.cell_size.0, self.cell_size.1))
+        } else {
+            None
+        };
+        if self.resize_increments != increments {
+            self.window.set_resize_increments(increments);
+            self.resize_increments = increments;
+        }
     }
 
     /// Avoid repeated native size-hint updates. Single-pane windows have no minimum.
@@ -765,7 +787,12 @@ impl Display {
     }
 
     /// Shared layout inputs, including the space occupied by the window message bar.
-    pub fn layout_params(&self, config: &UiConfig, messages: &MessageBuffer) -> LayoutParams {
+    pub fn layout_params(
+        &self,
+        config: &UiConfig,
+        messages: &MessageBuffer,
+        multiple_panes: bool,
+    ) -> LayoutParams {
         let padding = config.window.padding(self.window.scale_factor as f32);
         let size = SizeInfo::new(
             self.window_size.width as f32,
@@ -777,8 +804,16 @@ impl Display {
             config.window.dynamic_padding,
         );
         let lines = messages.message().map_or(0, |message| message.text(&size).len());
-        let divider = (self.window.scale_factor as f32).round().max(1.) as u32;
-        layout_params(self.window_size, self.cell_size, padding, lines, divider)
+        let scale = self.window.scale_factor as f32;
+        let divider = config.panes.divider_pixels(scale);
+        let extra = if multiple_panes { config.panes.padding_pixels(scale) } else { 0. };
+        layout_params(
+            self.window_size,
+            self.cell_size,
+            (padding.0 + extra, padding.1 + extra),
+            lines,
+            divider,
+        )
     }
 
     /// Construct a new terminal at its final rectangle before spawning its PTY.
@@ -796,6 +831,7 @@ impl Display {
             config,
         );
         view.rect = rect;
+        view.is_split = true;
         let size = view.size_for_rect(
             self.cell_size,
             config,
@@ -1171,14 +1207,11 @@ impl Display {
             0.,
             false,
         );
-        let color = config.colors.primary.foreground;
-        let bg = config.colors.primary.background;
-        let muted = Rgb::new(
-            ((u16::from(color.r) + 3 * u16::from(bg.r)) / 4) as u8,
-            ((u16::from(color.g) + 3 * u16::from(bg.g)) / 4) as u8,
-            ((u16::from(color.b) + 3 * u16::from(bg.b)) / 4) as u8,
-        );
-        let thickness = (self.window.scale_factor as f32).round().max(1.) as u32;
+        let color = config.panes.focused_edge_color.unwrap_or(config.colors.primary.foreground);
+        let muted = config
+            .panes
+            .divider_color(config.colors.primary.foreground, config.colors.primary.background);
+        let thickness = config.panes.edge_pixels(self.window.scale_factor as f32);
         let rects = decorations(dividers, focused, thickness)
             .map(|(rect, is_focused)| {
                 let color = if is_focused { color } else { muted };
@@ -1877,6 +1910,23 @@ mod pane_size_tests {
 
     fn view(width: u32, height: u32, config: &UiConfig) -> PaneView {
         PaneView::new(SizeInfo::new(width as f32, height as f32, 8., 16., 0., 0., false), config)
+    }
+
+    #[test]
+    fn split_padding_is_two_logical_pixels_and_single_pane_padding_is_unchanged() {
+        let config = UiConfig::default();
+        let mut pane = view(800, 600, &config);
+        let messages = MessageBuffer::default();
+        let search = SearchState::default();
+        let single = pane.size_for_rect((8., 16.), &config, 1., &messages, &search);
+        pane.is_split = true;
+        let split = pane.size_for_rect((8., 16.), &config, 1., &messages, &search);
+        assert_eq!((split.padding_x(), split.padding_y()), (2., 2.));
+        assert_eq!(split.columns(), 99);
+        let retina = pane.size_for_rect((16., 32.), &config, 2., &messages, &search);
+        assert_eq!((retina.padding_x(), retina.padding_y()), (4., 4.));
+        pane.is_split = false;
+        assert_eq!(pane.size_for_rect((8., 16.), &config, 1., &messages, &search), single);
     }
 
     #[test]

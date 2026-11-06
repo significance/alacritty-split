@@ -1,0 +1,10 @@
+# Import this file or copy its table into your Alacritty config.
+[panes]
+# Extra padding per side in split panes; single-pane padding is unchanged.
+padding = 2
+# Integer logical pixels, scaled with display DPI. Zero hides the corresponding border.
+divider_thickness = 1
+focused_edge_thickness = 1
+# Omit colors to follow the terminal theme.
+# divider_color = "#404040"
+# focused_edge_color = "#88c0d0"

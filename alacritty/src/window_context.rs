@@ -55,6 +55,8 @@ pub struct WindowContext {
     pointer_pane: Option<PaneId>,
     pointer: PointerState,
     seed_pointer: bool,
+    pointer_target: Option<PaneId>,
+    window_focused: bool,
     touch: TouchPurpose,
     occluded: bool,
     preserve_title: bool,
@@ -120,7 +122,8 @@ impl WindowContext {
     }
 
     fn valid_layout_params(&self) -> crate::pane::layout::LayoutParams {
-        let mut params = self.display.layout_params(&self.config, &self.message_buffer);
+        let mut params =
+            self.display.layout_params(&self.config, &self.message_buffer, self.panes.len() > 1);
         if let Ok(minimum) = self.layout.minimum(params) {
             params.bounds.width = params.bounds.width.max(minimum.width);
             params.bounds.height = params.bounds.height.max(minimum.height);
@@ -151,6 +154,7 @@ impl WindowContext {
             let mut terminal = old.terminal.lock();
             let focused = terminal.is_focused;
             if focused && terminal.mode().contains(TermMode::FOCUS_IN_OUT) {
+                // An exited pane may be here; its notifier ignores a closed PTY channel.
                 old.notifier.notify(b"\x1b[O".to_vec());
             }
             terminal.is_focused = false;
@@ -230,13 +234,15 @@ impl WindowContext {
         proxy: &EventLoopProxy<Event>,
         scheduler: &mut Scheduler,
     ) -> Result<(), Box<dyn Error>> {
-        let id = self.allocate_pane_id();
+        let id = PaneId(self.next_pane_id);
         // Validate against a candidate tree before starting a shell or running its rc files.
-        let params = self.display.layout_params(&self.config, &self.message_buffer);
+        let params = self.display.layout_params(&self.config, &self.message_buffer, true);
         let mut candidate = self.layout.clone();
         let geometry = candidate
             .split(self.focused, id, orientation, params)
             .map_err(|error| format!("{error:?}"))?;
+        let allocated = self.allocate_pane_id();
+        debug_assert_eq!(id, allocated);
         let mut options = WindowOptions::default();
         #[cfg(not(windows))]
         {
@@ -385,6 +391,8 @@ impl WindowContext {
             pointer_pane: None,
             pointer: PointerState::default(),
             seed_pointer: false,
+            pointer_target: None,
+            window_focused: true,
             touch: Default::default(),
             dirty: Default::default(),
         };
@@ -445,6 +453,7 @@ impl WindowContext {
         if window_config.padding(1.) != self.config.window.padding(1.)
             || window_config.dynamic_padding != self.config.window.dynamic_padding
             || window_config.resize_increments != self.config.window.resize_increments
+            || old_config.panes != self.config.panes
         {
             self.display.pending_update.dirty = true;
         }
@@ -676,10 +685,12 @@ impl WindowContext {
                     },
                 }
             },
-            WinitEvent::WindowEvent { event: WindowEvent::MouseWheel { .. }, .. }
-                if self.pointer.drag.is_some() || self.pointer_pane != Some(self.focused) =>
-            {
-                return None;
+            WinitEvent::WindowEvent { event: WindowEvent::MouseWheel { .. }, .. } => {
+                if self.pointer.drag.is_some() {
+                    return None;
+                }
+                self.pointer_target = self.pointer.capture.or(self.pointer_pane);
+                self.pointer_target?;
             },
             _ => (),
         }
@@ -742,12 +753,15 @@ impl WindowContext {
             let pointer_routed = (multiple_panes || self.pointer.has_suppressed_buttons())
                 && is_pointer_event(&self.event_queue[0]);
             if pointer_routed {
+                self.pointer_target = None;
                 let event = self.event_queue.remove(0);
                 let Some(event) = self.route_pointer_event(event, scheduler) else { continue };
                 self.event_queue.insert(0, event);
             }
             let next = &self.event_queue[0];
-            let pane_id = event_target(next, self.focused);
+            let pane_id =
+                self.pointer_target.take().unwrap_or_else(|| event_target(next, self.focused));
+            let background_wheel = pane_id != self.focused && pointer_routed;
             let count = if pointer_routed {
                 1
             } else {
@@ -779,6 +793,8 @@ impl WindowContext {
                 pane_commands: &mut pane_commands,
                 pane_title: &mut pane.title,
                 is_active_pane: pane_id == self.focused,
+                window_focused: &mut self.window_focused,
+                window_message_bar_handled: multiple_panes,
                 cursor_blink_timed_out: &mut pane.cursor_blink_timed_out,
                 prev_bell_cmd: &mut pane.prev_bell_cmd,
                 message_buffer: &mut self.message_buffer,
@@ -788,7 +804,7 @@ impl WindowContext {
                 notifier: &mut pane.notifier,
                 display: &mut self.display,
                 pane_view: &mut pane.view,
-                mouse: &mut self.mouse,
+                mouse: if background_wheel { &mut pane.wheel_mouse } else { &mut self.mouse },
                 touch: &mut self.touch,
                 dirty: &mut self.dirty,
                 occluded: &mut self.occluded,
@@ -806,6 +822,10 @@ impl WindowContext {
                 scheduler,
             };
             let mut processor = input::Processor::new(context);
+            if background_wheel {
+                let local = processor.ctx.pane_view.rect.local_position(self.pointer.position);
+                processor.seed_mouse_position(PhysicalPosition::new(local.0, local.1));
+            }
 
             let rect = processor.ctx.pane_view.rect;
             let remaining =
@@ -901,7 +921,9 @@ impl WindowContext {
 
     /// Compute geometry once per update; rendering consumes the stored result.
     fn update_geometry(&mut self) {
-        let mut params = self.display.layout_params(&self.config, &self.message_buffer);
+        self.display.update_resize_increments(&self.config, self.panes.len() > 1);
+        let mut params =
+            self.display.layout_params(&self.config, &self.message_buffer, self.panes.len() > 1);
         if self.panes.len() == 1 {
             // Preserve the upstream ability to shrink a single pane below its grid minimum.
             self.display.set_minimum_window_size(None);
@@ -944,7 +966,9 @@ impl WindowContext {
     ) {
         let invalidate = self.display.handle_update(&self.config);
         self.update_geometry();
+        let is_split = self.panes.len() > 1;
         for (&id, pane) in &mut self.panes {
+            pane.view.is_split = is_split;
             pane.view.rect = self.geometry.panes[&id];
             if invalidate {
                 pane.view.damage_tracker.frame().mark_fully_damaged();

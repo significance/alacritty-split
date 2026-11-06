@@ -30,6 +30,7 @@ use crate::config::debug::Debug;
 use crate::config::font::Font;
 use crate::config::general::General;
 use crate::config::mouse::Mouse;
+use crate::config::panes::Panes;
 use crate::config::scrolling::Scrolling;
 use crate::config::selection::Selection;
 use crate::config::terminal::Terminal;
@@ -62,6 +63,9 @@ pub struct UiConfig {
 
     /// Window configuration.
     pub window: WindowConfig,
+
+    /// Native split-pane styling.
+    pub panes: Panes,
 
     /// Mouse configuration.
     pub mouse: Mouse,

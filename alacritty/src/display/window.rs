@@ -389,8 +389,8 @@ impl Window {
         self.window.set_min_inner_size(size);
     }
 
-    pub fn set_resize_increments(&self, increments: PhysicalSize<f32>) {
-        self.window.set_resize_increments(Some(increments));
+    pub fn set_resize_increments(&self, increments: Option<PhysicalSize<f32>>) {
+        self.window.set_resize_increments(increments);
     }
 
     /// Toggle the window's fullscreen state.

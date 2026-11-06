@@ -19,7 +19,14 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 - Native nested terminal panes with split, close, and directional focus actions
 - Click-to-focus panes, draggable dividers, and pane-relative IME candidate placement
+- Hovered-pane scrolling without changing keyboard focus
+- Configurable pane padding, divider styles, and focused borders under `[panes]`
+- Two logical pixels of extra padding inside each split pane by default
 - macOS Cmd+D and Cmd+Shift+D split shortcuts; Cmd+W closes the focused pane
+
+### Changed
+
+- Disable cell-size window resize increments while split; restore for the last pane
 
 ### Fixed
 

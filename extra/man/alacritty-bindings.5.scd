@@ -622,7 +622,8 @@ for another pane, the split is rejected without starting a shell.
 
 Click an unfocused pane to focus it; that click is consumed. Later clicks use
 normal selection or terminal mouse reporting. Drag dividers to resize panes.
-Mouse wheels over inactive panes or dividers are ignored until the pane is focused.
+Mouse wheels scroll the pane under the pointer without changing keyboard focus.
+Wheels over dividers are ignored.
 
 # SEE ALSO
 

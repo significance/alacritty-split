@@ -187,6 +187,7 @@ This section documents the *[window]* table of the configuration file.
 *resize_increments* = _true_ | _false_ # _(works on macOS/X11/Wayland)_
 
 	Prefer resizing window by discrete steps equal to cell dimensions.
+	Temporarily disabled while multiple panes exist; restored for the last pane.
 
 	Default: _false_
 
@@ -213,6 +214,52 @@ padding = { x = _3_, y = _3_ }++
 dynamic_padding = _true_++
 opacity = _0.9_
 
+
+# PANES
+
+Native split-pane options are configured in the *[panes]* table. Thickness and
+padding values are integer logical pixels, scaled for the window's display.
+Changes apply to existing panes on config reload.
+
+*padding* = _<integer>_
+
+	Extra inset on every side of each split pane, added to *window.padding*.
+	It applies only while multiple panes exist. Single-pane padding is unchanged.
+
+	Default: _2_
+
+*divider_thickness* = _<integer>_
+
+	Space between panes. Set to _0_ to hide dividers and disable mouse grabbing.
+
+	Default: _1_
+
+*divider_color* = _"#RRGGBB"_
+
+	Divider colour. When omitted, use a muted blend of one part primary foreground
+	to three parts primary background.
+
+*focused_edge_thickness* = _<integer>_
+
+	Border inside the focused pane. Set to _0_ to hide the focus border.
+	Hidden automatically when only one pane exists.
+
+	Default: _1_
+
+*focused_edge_color* = _"#RRGGBB"_
+
+	Focused border colour. Defaults to the primary foreground when omitted.
+
+Example:
+
+```
+[panes]
+padding = 2
+divider_thickness = 1
+focused_edge_thickness = 1
+# divider_color = "#404040"
+# focused_edge_color = "#88c0d0"
+```
 
 # SCROLLING
 

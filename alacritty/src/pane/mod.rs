@@ -30,7 +30,7 @@ use alacritty_terminal::tty;
 use crate::cli::WindowOptions;
 use crate::config::UiConfig;
 use crate::display::PaneView;
-use crate::event::{Event, EventProxy, InlineSearchState, SearchState};
+use crate::event::{Event, EventProxy, InlineSearchState, Mouse, SearchState};
 
 /// Stable identity of a pane within a window. Identities are never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -62,6 +62,8 @@ pub fn process_batch<E>(
 pub struct Pane {
     pub view: PaneView,
     pub title: Option<String>,
+    /// Independent wheel accumulation when scrolling this pane without focusing it.
+    pub wheel_mouse: Mouse,
     pub terminal: Arc<FairMutex<Term<EventProxy>>>,
     pub notifier: Notifier,
     pub cursor_blink_timed_out: bool,
@@ -140,6 +142,7 @@ impl Pane {
         Ok(Self {
             view,
             title: None,
+            wheel_mouse: Mouse::default(),
             terminal,
             notifier: Notifier(loop_tx),
             cursor_blink_timed_out: Default::default(),

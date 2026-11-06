@@ -9,6 +9,12 @@
        src="https://raw.githubusercontent.com/alacritty/alacritty/master/extra/promo/alacritty-readme.png">
 </p>
 
+## Native splits in this fork
+
+This personal fork adds native split panes: **Cmd+D** opens a pane on the right,
+**Cmd+Shift+D** opens one below. See the [split-pane guide](docs/native-splits.md)
+for focus, mouse controls, styling, and build/run commands.
+
 ## About
 
 Alacritty is a modern terminal emulator that comes with sensible defaults, but
