@@ -311,6 +311,8 @@ impl Display for Action {
 /// Vi mode specific actions.
 #[derive(ConfigDeserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ViAction {
+    /// Copy a nonempty selection, clear it and leave vi mode.
+    Yank,
     /// Toggle normal vi selection.
     ToggleNormalSelection,
     /// Toggle line vi selection.
@@ -455,6 +457,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         End,       ModifiersState::SHIFT, ~BindingMode::ALT_SCREEN; Action::ScrollToBottom;
         PageUp,    ModifiersState::SHIFT, ~BindingMode::ALT_SCREEN; Action::ScrollPageUp;
         PageDown,  ModifiersState::SHIFT, ~BindingMode::ALT_SCREEN; Action::ScrollPageDown;
+        PageUp,   ~BindingMode::ALT_SCREEN, ~BindingMode::SEARCH; Action::ScrollPageUp;
+        PageDown, ~BindingMode::ALT_SCREEN, ~BindingMode::SEARCH; Action::ScrollPageDown;
         // App cursor mode.
         Home,       +BindingMode::APP_CURSOR, ~BindingMode::VI, ~BindingMode::SEARCH; Action::Esc("\x1bOH".into());
         End,        +BindingMode::APP_CURSOR, ~BindingMode::VI, ~BindingMode::SEARCH; Action::Esc("\x1bOF".into());
@@ -488,14 +492,12 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         "f",      ModifiersState::CONTROL,  +BindingMode::VI, ~BindingMode::SEARCH; Action::ScrollPageDown;
         "u",      ModifiersState::CONTROL,  +BindingMode::VI, ~BindingMode::SEARCH; Action::ScrollHalfPageUp;
         "d",      ModifiersState::CONTROL,  +BindingMode::VI, ~BindingMode::SEARCH; Action::ScrollHalfPageDown;
-        "y",                                +BindingMode::VI, ~BindingMode::SEARCH; Action::Copy;
-        "y",                                +BindingMode::VI, ~BindingMode::SEARCH; Action::ClearSelection;
+        "y",                                +BindingMode::VI, ~BindingMode::SEARCH; ViAction::Yank;
         "/",                                +BindingMode::VI, ~BindingMode::SEARCH; Action::SearchForward;
         "?",      ModifiersState::SHIFT,    +BindingMode::VI, ~BindingMode::SEARCH; Action::SearchBackward;
         "y",      ModifiersState::SHIFT,    +BindingMode::VI, ~BindingMode::SEARCH; ViAction::ToggleNormalSelection;
         "y",      ModifiersState::SHIFT,    +BindingMode::VI, ~BindingMode::SEARCH; ViMotion::Last;
-        "y",      ModifiersState::SHIFT,    +BindingMode::VI, ~BindingMode::SEARCH; Action::Copy;
-        "y",      ModifiersState::SHIFT,    +BindingMode::VI, ~BindingMode::SEARCH; Action::ClearSelection;
+        "y",      ModifiersState::SHIFT,    +BindingMode::VI, ~BindingMode::SEARCH; ViAction::Yank;
         "v",                                +BindingMode::VI, ~BindingMode::SEARCH; ViAction::ToggleNormalSelection;
         "v",      ModifiersState::SHIFT,    +BindingMode::VI, ~BindingMode::SEARCH; ViAction::ToggleLineSelection;
         "v",      ModifiersState::CONTROL,  +BindingMode::VI, ~BindingMode::SEARCH; ViAction::ToggleBlockSelection;
@@ -1280,6 +1282,73 @@ impl<'a> de::Deserialize<'a> for ModsWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_keys_scroll_primary_screen_but_pass_through_in_alt_and_search() {
+        let bindings = default_key_bindings();
+        for (key, action) in
+            [(NamedKey::PageUp, Action::ScrollPageUp), (NamedKey::PageDown, Action::ScrollPageDown)]
+        {
+            let trigger = BindingKey::Keycode { key: Key::Named(key), location: KeyLocation::Any };
+            for mode in [BindingMode::empty(), BindingMode::VI] {
+                for mods in [ModifiersState::empty(), ModifiersState::SHIFT] {
+                    let actions: Vec<_> = bindings
+                        .iter()
+                        .filter(|binding| binding.is_triggered_by(mode, mods, &trigger))
+                        .map(|binding| binding.action.clone())
+                        .collect();
+                    assert_eq!(actions, std::slice::from_ref(&action));
+                }
+            }
+            for mode in [
+                BindingMode::ALT_SCREEN,
+                BindingMode::ALT_SCREEN | BindingMode::VI,
+                BindingMode::SEARCH,
+                BindingMode::SEARCH | BindingMode::VI,
+            ] {
+                assert!(!bindings.iter().any(|binding| binding.is_triggered_by(
+                    mode,
+                    ModifiersState::empty(),
+                    &trigger
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn vi_yank_defaults_preserve_sequence_and_exclude_search() {
+        let bindings = default_key_bindings();
+        let trigger =
+            BindingKey::Keycode { key: Key::Character("y".into()), location: KeyLocation::Any };
+        for (mods, expected) in [
+            (ModifiersState::empty(), vec![Action::Vi(ViAction::Yank)]),
+            (ModifiersState::SHIFT, vec![
+                Action::Vi(ViAction::ToggleNormalSelection),
+                Action::ViMotion(ViMotion::Last),
+                Action::Vi(ViAction::Yank),
+            ]),
+        ] {
+            let actions: Vec<_> = bindings
+                .iter()
+                .filter(|binding| binding.is_triggered_by(BindingMode::VI, mods, &trigger))
+                .map(|binding| binding.action.clone())
+                .collect();
+            assert_eq!(actions, expected);
+            assert!(!bindings.iter().any(|binding| binding.is_triggered_by(
+                BindingMode::VI | BindingMode::SEARCH,
+                mods,
+                &trigger
+            )));
+        }
+    }
+
+    #[test]
+    fn vi_yank_deserializes() {
+        let binding: KeyBinding =
+            toml::from_str("key = \"y\"\nmode = \"Vi\"\naction = \"Yank\"").unwrap();
+        assert_eq!(binding.action, Action::Vi(ViAction::Yank));
+        assert_eq!(binding.mode, BindingMode::VI);
+    }
 
     #[test]
     fn macos_pane_bindings_match_requested_shortcuts() {

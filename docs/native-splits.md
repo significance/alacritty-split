@@ -27,6 +27,16 @@ New shells inherit the foreground process's working directory when available. A 
 that will not fit is rejected before starting another shell. Exiting a shell collapses
 its split and resizes its neighbors.
 
+## Keys changed from upstream
+
+- Bare PageUp/PageDown scroll the focused pane's primary screen, including in vi mode.
+  Alternate-screen programs still receive them, and search behavior is unchanged.
+  Shell history-navigation bindings on these keys are displaced. Bind PageUp/PageDown
+  to `ReceiveChar` to restore upstream behavior. Shift+PageUp/PageDown still scroll.
+- In vi mode, `y` copies the selection, clears it and returns to normal terminal mode.
+  With no selection it stays in vi mode. `Shift+Y` selects to line end and yanks.
+  Bind `y` back to `Copy` plus `ClearSelection` to keep vi mode after copying.
+
 ## Build and run
 
 From the repository:
@@ -81,4 +91,5 @@ terminal lock per event; ordinary single-pane event batching is preserved.
 
 Linux tests and virtual-display functional checks pass. Claude has independently built
 and tested the keyboard and mouse phases on macOS. Final native Mac visual/input checks
-for pane zoom are tracked in [the Phase 6 report](native-splits-phase6.md).
+for pane zoom and key changes are tracked in [Phase 6](native-splits-phase6.md) and
+[Phase 7](native-splits-phase7.md).

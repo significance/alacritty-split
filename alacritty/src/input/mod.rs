@@ -198,6 +198,17 @@ impl<T: EventListener> Execute<T> for Action {
                 ctx.terminal_mut().vi_motion(*motion);
                 ctx.mark_dirty();
             },
+            Action::Vi(ViAction::Yank)
+                if ctx
+                    .terminal()
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| !selection.is_empty()) =>
+            {
+                ctx.copy_selection(ClipboardType::Clipboard);
+                ctx.clear_selection();
+                ctx.toggle_vi_mode();
+            },
             Action::Vi(ViAction::ToggleNormalSelection) => {
                 Self::toggle_selection(ctx, SelectionType::Simple);
             },
@@ -1193,6 +1204,8 @@ mod tests {
     use winit::window::WindowId;
 
     use alacritty_terminal::event::Event as TerminalEvent;
+    use alacritty_terminal::index::Line;
+    use alacritty_terminal::selection::Selection;
 
     use crate::config::Binding;
     use crate::message_bar::MessageBuffer;
@@ -1212,6 +1225,7 @@ mod tests {
         config: &'a UiConfig,
         window_message_bar_handled: bool,
         pane_commands: Vec<PaneCommand>,
+        copied: Option<String>,
         inline_search_state: &'a mut InlineSearchState,
     }
 
@@ -1258,7 +1272,32 @@ mod tests {
         }
 
         fn selection_is_empty(&self) -> bool {
-            true
+            self.terminal.selection.as_ref().is_none_or(Selection::is_empty)
+        }
+
+        fn copy_selection(&mut self, ty: ClipboardType) {
+            assert_eq!(ty, ClipboardType::Clipboard);
+            let text = self.terminal.selection_to_string().unwrap();
+            self.clipboard.store(ty, text.clone());
+            self.copied = Some(text);
+        }
+
+        fn clear_selection(&mut self) {
+            self.terminal.selection = None;
+        }
+
+        fn toggle_vi_mode(&mut self) {
+            self.terminal.toggle_vi_mode();
+        }
+
+        fn toggle_selection(&mut self, ty: SelectionType, point: Point, side: Side) {
+            match &mut self.terminal.selection {
+                Some(selection) if selection.ty == ty && !selection.is_empty() => {
+                    self.clear_selection();
+                },
+                Some(selection) if !selection.is_empty() => selection.ty = ty,
+                _ => self.terminal.selection = Some(Selection::new(ty, point, side)),
+            }
         }
 
         fn scroll(&mut self, scroll: Scroll) {
@@ -1326,6 +1365,93 @@ mod tests {
         }
     }
 
+    fn with_yank_context(test: impl FnOnce(&mut ActionContext<'_, MockEventProxy>)) {
+        let cfg = UiConfig::default();
+        let size = SizeInfo::new(800., 600., 8., 16., 0., 0., false);
+        let mut terminal = Term::new(cfg.term_options(), &size, MockEventProxy);
+        for c in "hello world".chars() {
+            terminal.input(c);
+        }
+        terminal.toggle_vi_mode();
+        terminal.vi_mode_cursor.point = Point::new(Line(0), Column(0));
+        let mut mouse = Mouse::default();
+        let mut clipboard = Clipboard::new_nop();
+        let mut messages = MessageBuffer::default();
+        let mut inline = InlineSearchState::default();
+        let mut context = ActionContext {
+            terminal: &mut terminal,
+            size_info: &size,
+            mouse: &mut mouse,
+            clipboard: &mut clipboard,
+            message_buffer: &mut messages,
+            modifiers: Modifiers::default(),
+            config: &cfg,
+            inline_search_state: &mut inline,
+            pane_commands: Vec::new(),
+            copied: None,
+            window_message_bar_handled: false,
+        };
+        test(&mut context);
+    }
+
+    #[test]
+    fn vi_yank_without_selection_keeps_clipboard_and_mode() {
+        with_yank_context(|ctx| {
+            ctx.copied = Some("previous clipboard".into());
+            Action::Vi(ViAction::Yank).execute(ctx);
+            assert_eq!(ctx.copied.as_deref(), Some("previous clipboard"));
+            assert!(ctx.terminal.mode().contains(TermMode::VI));
+        });
+    }
+
+    #[test]
+    fn vi_yank_with_empty_selection_keeps_mode() {
+        with_yank_context(|ctx| {
+            ctx.terminal.selection = Some(Selection::new(
+                SelectionType::Simple,
+                Point::new(Line(0), Column(0)),
+                Side::Left,
+            ));
+            Action::Vi(ViAction::Yank).execute(ctx);
+            assert_eq!(ctx.copied, None);
+            assert!(ctx.terminal.mode().contains(TermMode::VI));
+            assert!(ctx.terminal.selection.is_some());
+        });
+    }
+
+    #[test]
+    fn vi_yank_copies_mouse_selection_clears_it_and_leaves_mode() {
+        with_yank_context(|ctx| {
+            let mut selection =
+                Selection::new(SelectionType::Simple, Point::new(Line(0), Column(0)), Side::Left);
+            selection.update(Point::new(Line(0), Column(4)), Side::Right);
+            ctx.terminal.selection = Some(selection);
+            Action::Vi(ViAction::Yank).execute(ctx);
+            assert_eq!(ctx.copied.as_deref(), Some("hello"));
+            assert!(ctx.terminal.selection.is_none());
+            assert!(!ctx.terminal.mode().contains(TermMode::VI));
+        });
+    }
+
+    #[test]
+    fn vi_uppercase_y_yanks_to_line_end_and_leaves_mode() {
+        with_yank_context(|ctx| {
+            ctx.terminal.vi_mode_cursor.point = Point::new(Line(0), Column(6));
+            let binding: crate::config::KeyBinding =
+                toml::from_str("key = \"y\"\naction = \"None\"").unwrap();
+            let trigger = binding.trigger;
+            let bindings = ctx.config.key_bindings().to_vec();
+            for binding in bindings {
+                if binding.is_triggered_by(BindingMode::VI, ModifiersState::SHIFT, &trigger) {
+                    binding.action.execute(ctx);
+                }
+            }
+            assert_eq!(ctx.copied.as_deref(), Some("world"));
+            assert!(ctx.terminal.selection.is_none());
+            assert!(!ctx.terminal.mode().contains(TermMode::VI));
+        });
+    }
+
     #[test]
     fn upper_pane_padding_is_not_a_window_message_bar() {
         let cfg = UiConfig::default();
@@ -1346,6 +1472,7 @@ mod tests {
             config: &cfg,
             inline_search_state: &mut inline,
             pane_commands: Vec::new(),
+            copied: None,
             window_message_bar_handled: false,
         };
         let mut processor = Processor::new(context);
@@ -1373,6 +1500,7 @@ mod tests {
             config: &cfg,
             inline_search_state: &mut inline,
             pane_commands: Vec::new(),
+            copied: None,
             window_message_bar_handled: false,
         };
         let cases = [
@@ -1436,6 +1564,7 @@ mod tests {
                     message_buffer: &mut message_buffer,
                     inline_search_state: &mut inline_search_state,
                     pane_commands: Vec::new(),
+                    copied: None,
             window_message_bar_handled: false,
                     config: &cfg,
                 };

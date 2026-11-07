@@ -51,6 +51,14 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 :  _"~Vi|~Search"_
 :  *chars*: _"\\u000c"_
 |  _"PageUp"_
+:[
+:  _"~Alt|~Search"_
+:  _"ScrollPageUp"_
+|  _"PageDown"_
+:[
+:  _"~Alt|~Search"_
+:  _"ScrollPageDown"_
+|  _"PageUp"_
 :  _"Shift"_
 :  _"~Alt"_
 :  _"ScrollPageUp"_
@@ -66,6 +74,10 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 :  _"Shift"_
 :  _"~Alt"_
 :  _"ScrollToBottom"_
+
+Bare *PageUp*/*PageDown* scroll the primary screen, so the shell no longer receives
+them for history navigation. Alternate-screen applications and search are unaffected.
+Bind these keys to *ReceiveChar* to restore upstream behavior; Shift bindings remain.
 
 ## Vi Mode
 
@@ -132,11 +144,7 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 |  _"Y"_
 :[
 :  _"Vi|~Search"_
-:  _"Copy"_
-|  _"Y"_
-:[
-:  _"Vi|~Search"_
-:  _"ClearSelection"_
+:  _"Yank"_
 |  _"Copy"_
 :[
 :  _"Vi|~Search"_
@@ -152,11 +160,7 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 |  _"Y"_
 :  _"Shift"_
 :  _"Vi|~Search"_
-:  _"Copy"_
-|  _"Y"_
-:  _"Shift"_
-:  _"Vi|~Search"_
-:  _"ClearSelection"_
+:  _"Yank"_
 |  _"V"_
 :[
 :  _"Vi|~Search"_
@@ -330,6 +334,11 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 :  _"Vi|~Search"_
 :  _"SearchPrevious"_
 
+
+*Yank* copies a nonempty selection to the clipboard, clears it and leaves vi mode.
+Without a selection it does nothing. Default *y* uses *Yank*; *Shift+Y* first selects
+to the end of the line. To keep vi mode after copying, bind *y* to *Copy* and
+*ClearSelection* instead. *Copy* itself retains its existing behavior.
 
 ## Search Mode
 
