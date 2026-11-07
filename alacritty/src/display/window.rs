@@ -23,7 +23,7 @@ use std::fmt::{self, Display, Formatter};
 #[cfg(target_os = "macos")]
 use {
     objc2::MainThreadMarker,
-    objc2_app_kit::{NSColorSpace, NSView},
+    objc2_app_kit::{NSColorSpace, NSView, NSWindowTabbingMode},
     winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS, WindowExtMacOS},
 };
 
@@ -116,6 +116,9 @@ pub struct Window {
 
     window: WinitWindow,
 
+    #[cfg(target_os = "macos")]
+    tabbing_requested: bool,
+
     /// Current window title.
     title: String,
 
@@ -138,6 +141,9 @@ impl Window {
         #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
         x11_visual: Option<X11VisualInfo>,
     ) -> Result<Window> {
+        #[cfg(target_os = "macos")]
+        let tabbing_requested = options.window_tabbing_id.is_some();
+
         let identity = identity.clone();
         let mut window_attributes = Window::get_platform_window(
             &identity,
@@ -186,6 +192,12 @@ impl Window {
 
         let window = event_loop.create_window(window_attributes)?;
 
+        // AppKit chooses automatic tabs when the window is first ordered front.
+        #[cfg(target_os = "macos")]
+        if !tabbing_requested {
+            set_tabbing_mode(&window, NSWindowTabbingMode::Disallowed);
+        }
+
         // Text cursor.
         let current_mouse_cursor = CursorIcon::Text;
         window.set_cursor(current_mouse_cursor);
@@ -213,6 +225,8 @@ impl Window {
             has_frame: true,
             scale_factor,
             window,
+            #[cfg(target_os = "macos")]
+            tabbing_requested,
             is_x11,
             ime_inhibitor: Default::default(),
         })
@@ -504,6 +518,14 @@ impl Window {
         self.window.select_previous_tab();
     }
 
+    /// After first show, permit explicit Cmd+T tabs to join a standalone window.
+    #[cfg(target_os = "macos")]
+    pub fn allow_tabbing(&self) {
+        if !self.tabbing_requested {
+            set_tabbing_mode(&self.window, NSWindowTabbingMode::Automatic);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub fn tabbing_id(&self) -> String {
         self.window.tabbing_identifier()
@@ -518,6 +540,20 @@ bitflags! {
         const TOUCH = 1 << 1;
         const VI    = 1 << 2;
     }
+}
+
+#[cfg(target_os = "macos")]
+fn set_tabbing_mode(window: &WinitWindow, mode: NSWindowTabbingMode) {
+    let view = match window.window_handle().unwrap().as_raw() {
+        RawWindowHandle::AppKit(handle) => {
+            assert!(MainThreadMarker::new().is_some());
+            // SAFETY: winit owns this live NSView and we are on the main thread.
+            unsafe { handle.ns_view.cast::<NSView>().as_ref() }
+        },
+        _ => return,
+    };
+
+    view.window().unwrap().setTabbingMode(mode);
 }
 
 #[cfg(target_os = "macos")]

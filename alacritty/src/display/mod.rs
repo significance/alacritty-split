@@ -568,6 +568,10 @@ impl Display {
 
         window.set_visible(true);
 
+        // Keep explicit tab requests Preferred; standalone windows can accept future tabs.
+        #[cfg(target_os = "macos")]
+        window.allow_tabbing();
+
         // Always focus new windows, even if no Alacritty window is currently focused.
         #[cfg(target_os = "macos")]
         window.focus_window();

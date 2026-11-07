@@ -13,6 +13,10 @@ selection and search state.
 | Cmd+Shift+Enter | Zoom the focused pane; press again to restore tiling |
 | Cmd+Enter | Toggle instant fullscreen without macOS Spaces |
 
+On macOS, Cmd+N opens a separate window and Cmd+T opens a tab, independent of the
+"Prefer tabs when opening documents" preference, including in fullscreen. A new
+separate window can still receive tabs created with Cmd+T.
+
 Zoom fills the layout with the focused pane while preserving the tiling and split ratios.
 Hidden shells keep running at their existing sizes until tiling is restored. The zoomed
 pane retains its padding and focused outline, with no dividers. Split, close and

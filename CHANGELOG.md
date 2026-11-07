@@ -34,6 +34,8 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
+- macOS Cmd+N and IPC create-window opening tabs under the system auto-tabbing preference
+
 - Spurious "Failed to set new owner of XCB selection" warnings on X11
 - Lacking permissions to launch software sending Apple events
 - Off-by-one in vi mode ParagraphUp action

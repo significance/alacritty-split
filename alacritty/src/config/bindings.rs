@@ -595,6 +595,12 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
 
 #[cfg(all(target_os = "macos", not(test)))]
 pub fn platform_key_bindings() -> Vec<KeyBinding> {
+    macos_key_bindings()
+}
+
+/// Keep macOS defaults testable on other platforms.
+#[cfg(any(target_os = "macos", test))]
+fn macos_key_bindings() -> Vec<KeyBinding> {
     let mut bindings = bindings!(
         KeyBinding;
         Insert, ModifiersState::SHIFT, ~BindingMode::VI, ~BindingMode::SEARCH; Action::Esc("\x1b[2;2~".into());
@@ -1282,6 +1288,24 @@ impl<'a> de::Deserialize<'a> for ModsWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_new_window_and_tab_shortcuts_remain_distinct() {
+        let bindings = macos_key_bindings();
+        for (key, expected) in [("n", Action::CreateNewWindow), ("t", Action::CreateNewTab)] {
+            let trigger =
+                BindingKey::Keycode { key: Key::Character(key.into()), location: KeyLocation::Any };
+            let matches: Vec<_> = bindings
+                .iter()
+                .filter(|binding| {
+                    binding.mods == ModifiersState::SUPER && binding.trigger == trigger
+                })
+                .collect();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].action, expected);
+            assert!(matches[0].mode.is_empty() && matches[0].notmode.is_empty());
+        }
+    }
 
     #[test]
     fn page_keys_scroll_primary_screen_but_pass_through_in_alt_and_search() {
