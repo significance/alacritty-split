@@ -172,6 +172,9 @@ pub enum Action {
     /// Minimize the Alacritty window.
     Minimize,
 
+    /// Toggle the focused pane between its tiled rectangle and the full layout area.
+    TogglePaneZoom,
+
     /// Split the focused pane with a vertical divider.
     SplitVertical,
     /// Split the focused pane with a horizontal divider.
@@ -638,6 +641,8 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
 fn pane_key_bindings() -> Vec<KeyBinding> {
     bindings!(
         KeyBinding;
+        Enter, ModifiersState::SUPER; Action::ToggleSimpleFullscreen;
+        Enter, ModifiersState::SUPER | ModifiersState::SHIFT; Action::TogglePaneZoom;
         "w", ModifiersState::SUPER; Action::ClosePane;
         "d", ModifiersState::SUPER; Action::SplitVertical;
         "d", ModifiersState::SUPER | ModifiersState::SHIFT; Action::SplitHorizontal;
@@ -1280,6 +1285,12 @@ mod tests {
     fn macos_pane_bindings_match_requested_shortcuts() {
         let bindings = pane_key_bindings();
         let expected = [
+            (Key::Named(NamedKey::Enter), ModifiersState::SUPER, Action::ToggleSimpleFullscreen),
+            (
+                Key::Named(NamedKey::Enter),
+                ModifiersState::SUPER | ModifiersState::SHIFT,
+                Action::TogglePaneZoom,
+            ),
             (Key::Character("w".into()), ModifiersState::SUPER, Action::ClosePane),
             (Key::Character("d".into()), ModifiersState::SUPER, Action::SplitVertical),
             (
@@ -1320,6 +1331,7 @@ mod tests {
     #[test]
     fn pane_actions_are_bindable_on_all_platforms() {
         for name in [
+            "TogglePaneZoom",
             "SplitVertical",
             "SplitHorizontal",
             "ClosePane",

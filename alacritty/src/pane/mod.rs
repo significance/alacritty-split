@@ -3,6 +3,7 @@
 pub mod geometry;
 pub mod layout;
 pub mod pointer;
+pub mod zoom;
 
 use std::error::Error;
 use std::fs::File;
@@ -39,6 +40,7 @@ pub struct PaneId(pub u64);
 /// Window mutations are deferred until the input processor releases terminal locks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneCommand {
+    ToggleZoom,
     Split(layout::Orientation),
     Close,
     Focus(layout::FocusDirection),

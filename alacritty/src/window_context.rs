@@ -35,7 +35,7 @@ use crate::message_bar::MessageBuffer;
 use crate::pane::geometry::{PaneRect, hit_test};
 use crate::pane::layout::{Layout, LayoutGeometry, Orientation};
 use crate::pane::pointer::{ButtonAction, PointerState};
-use crate::pane::{Pane, PaneCommand, PaneId, event_target};
+use crate::pane::{Pane, PaneCommand, PaneId, event_target, zoom};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::{input, renderer};
 
@@ -47,6 +47,7 @@ pub struct WindowContext {
     event_queue: Vec<WinitEvent<Event>>,
     panes: BTreeMap<PaneId, Pane>,
     focused: PaneId,
+    zoomed: Option<PaneId>,
     layout: Layout,
     geometry: LayoutGeometry,
     next_pane_id: u64,
@@ -81,6 +82,7 @@ impl WindowContext {
         if !self.has_pane(pane_id) {
             return false;
         }
+        self.set_zoomed(zoom::after_exit(self.zoomed, pane_id), scheduler);
         if self.panes.len() == 1 {
             // Retain the terminal for --hold and reference-test serialization.
             return !self.display.window.hold;
@@ -122,8 +124,11 @@ impl WindowContext {
     }
 
     fn valid_layout_params(&self) -> crate::pane::layout::LayoutParams {
-        let mut params =
-            self.display.layout_params(&self.config, &self.message_buffer, self.panes.len() > 1);
+        let mut params = self.display.layout_params(
+            &self.config,
+            &self.message_buffer,
+            self.panes.len() > 1 || self.zoomed.is_some(),
+        );
         if let Ok(minimum) = self.layout.minimum(params) {
             params.bounds.width = params.bounds.width.max(minimum.width);
             params.bounds.height = params.bounds.height.max(minimum.height);
@@ -139,9 +144,33 @@ impl WindowContext {
         self.dirty = true;
     }
 
+    fn set_zoomed(&mut self, zoomed: Option<PaneId>, scheduler: &mut Scheduler) {
+        if self.zoomed == zoomed {
+            return;
+        }
+        self.zoomed = zoomed;
+        self.pointer.cancel_gesture();
+        self.mouse = Mouse::default();
+        scheduler.unschedule(
+            TimerId::new(Topic::SelectionScrolling, self.id()).with_pane(Some(self.focused)),
+        );
+        self.refresh_pane_sizes();
+        self.pointer_pane = hit_test(
+            self.geometry.panes.iter().map(|(&id, &rect)| (id, rect)),
+            self.pointer.position,
+        );
+        for pane in self.panes.values_mut() {
+            pane.view.damage_tracker.frame().mark_fully_damaged();
+        }
+        self.display.window.request_redraw();
+    }
+
     fn focus_pane(&mut self, id: PaneId, scheduler: &mut Scheduler) {
         if id == self.focused || !self.panes.contains_key(&id) {
             return;
+        }
+        if self.zoomed.is_some_and(|zoomed| zoomed != id) {
+            self.set_zoomed(None, scheduler);
         }
         let previous = self.focused;
         self.pointer.cancel_gesture();
@@ -203,7 +232,10 @@ impl WindowContext {
         proxy: &EventLoopProxy<Event>,
         scheduler: &mut Scheduler,
     ) {
+        let zoomed = zoom::after_command(self.zoomed, self.focused, self.panes.len(), command);
+        self.set_zoomed(zoomed, scheduler);
         match command {
+            PaneCommand::ToggleZoom => (),
             PaneCommand::Split(orientation) => {
                 if let Err(error) = self.split_pane(orientation, proxy, scheduler) {
                     warn!("Cannot split pane: {error}");
@@ -374,6 +406,7 @@ impl WindowContext {
             preserve_title,
             panes: Default::default(),
             focused,
+            zoomed: None,
             layout: Layout::Leaf(focused),
             geometry: LayoutGeometry {
                 panes: [(focused, pane_view.rect)].into(),
@@ -539,6 +572,9 @@ impl WindowContext {
         self.display.process_renderer_update(&mut focused.view);
         let context_reset = self.display.begin_frame(&self.config);
         for (&id, pane) in &mut self.panes {
+            if !self.geometry.panes.contains_key(&id) {
+                continue;
+            }
             if context_reset {
                 pane.view.damage_tracker.frame().mark_fully_damaged();
             }
@@ -558,7 +594,7 @@ impl WindowContext {
                 id == self.focused,
             );
         }
-        let multiple_panes = self.panes.len() > 1;
+        let multiple_panes = self.panes.len() > 1 || self.zoomed.is_some();
         if multiple_panes {
             self.display.draw_pane_edges(
                 self.geometry.dividers.iter().map(|divider| divider.rect),
@@ -574,7 +610,10 @@ impl WindowContext {
             &self.config,
             multiple_panes,
         );
-        for pane in self.panes.values_mut() {
+        for (&id, pane) in &mut self.panes {
+            if !self.geometry.panes.contains_key(&id) {
+                continue;
+            }
             pane.view.damage_tracker.swap_damage();
         }
     }
@@ -749,7 +788,7 @@ impl WindowContext {
         }
 
         while !self.event_queue.is_empty() {
-            let multiple_panes = self.panes.len() > 1;
+            let multiple_panes = self.panes.len() > 1 || self.zoomed.is_some();
             let pointer_routed = (multiple_panes || self.pointer.has_suppressed_buttons())
                 && is_pointer_event(&self.event_queue[0]);
             if pointer_routed {
@@ -922,9 +961,12 @@ impl WindowContext {
     /// Compute geometry once per update; rendering consumes the stored result.
     fn update_geometry(&mut self) {
         self.display.update_resize_increments(&self.config, self.panes.len() > 1);
-        let mut params =
-            self.display.layout_params(&self.config, &self.message_buffer, self.panes.len() > 1);
-        if self.panes.len() == 1 {
+        let mut params = self.display.layout_params(
+            &self.config,
+            &self.message_buffer,
+            self.panes.len() > 1 || self.zoomed.is_some(),
+        );
+        if self.panes.len() == 1 && self.zoomed.is_none() {
             // Preserve the upstream ability to shrink a single pane below its grid minimum.
             self.display.set_minimum_window_size(None);
             self.geometry = LayoutGeometry {
@@ -948,7 +990,7 @@ impl WindowContext {
         let clipped = params.bounds.width < minimum.width || params.bounds.height < minimum.height;
         params.bounds.width = params.bounds.width.max(minimum.width);
         params.bounds.height = params.bounds.height.max(minimum.height);
-        match self.layout.geometry(params) {
+        match zoom::geometry(&self.layout, params, self.zoomed) {
             Ok(geometry) => self.geometry = geometry,
             Err(error) => warn!("Cannot update pane geometry: {error:?}"),
         }
@@ -966,10 +1008,11 @@ impl WindowContext {
     ) {
         let invalidate = self.display.handle_update(&self.config);
         self.update_geometry();
-        let is_split = self.panes.len() > 1;
+        let is_split = self.panes.len() > 1 || self.zoomed.is_some();
         for (&id, pane) in &mut self.panes {
+            let Some(&rect) = self.geometry.panes.get(&id) else { continue };
             pane.view.is_split = is_split;
-            pane.view.rect = self.geometry.panes[&id];
+            pane.view.rect = rect;
             if invalidate {
                 pane.view.damage_tracker.frame().mark_fully_damaged();
             }

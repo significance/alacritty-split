@@ -606,6 +606,15 @@ On macOS, *Command+D* runs *SplitVertical*, *Command+Shift+D* runs
 the window. *Command+Option+Left/Right/Up/Down* runs the corresponding
 *FocusPaneLeft*, *FocusPaneRight*, *FocusPaneUp*, or *FocusPaneDown* action.
 
+*TogglePaneZoom* fills the layout with the focused pane and restores the previous
+tiling on the next toggle. With one pane it does nothing. Hidden shells keep running
+at their existing sizes. Split, close and directional focus actions leave zoom first.
+The zoomed pane retains its padding and focused edge, without dividers.
+
+On macOS, *Command+Shift+Enter* runs *TogglePaneZoom*, and *Command+Enter* runs
+*ToggleSimpleFullscreen* for instant fullscreen without Spaces. *Command+Control+F*
+continues to run *ToggleFullscreen*.
+
 All pane actions can be bound on any platform. For example:
 
 ```

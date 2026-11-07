@@ -23,6 +23,8 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Configurable pane padding, divider styles, and focused borders under `[panes]`
 - One logical pixel of extra padding inside each split pane by default
 - macOS Cmd+D and Cmd+Shift+D split shortcuts; Cmd+W closes the focused pane
+- `TogglePaneZoom` action; macOS Cmd+Shift+Enter zooms and restores the focused pane
+- macOS Cmd+Enter toggles instant fullscreen without Spaces
 
 ### Changed
 

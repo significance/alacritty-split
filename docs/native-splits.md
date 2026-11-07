@@ -10,6 +10,14 @@ selection and search state.
 | Cmd+Shift+D | Split horizontally: new pane below |
 | Cmd+Option+arrow | Focus the neighboring pane |
 | Cmd+W | Close the focused pane; the last pane closes its window |
+| Cmd+Shift+Enter | Zoom the focused pane; press again to restore tiling |
+| Cmd+Enter | Toggle instant fullscreen without macOS Spaces |
+
+Zoom fills the layout with the focused pane while preserving the tiling and split ratios.
+Hidden shells keep running at their existing sizes until tiling is restored. The zoomed
+pane retains its padding and focused outline, with no dividers. Split, close and
+directional focus actions leave zoom first. A single-pane zoom shortcut does nothing.
+Cmd+Control+F continues to toggle native macOS fullscreen.
 
 Click another pane to focus it. That first click is consumed, including with terminal
 mouse reporting enabled. Later clicks use normal selection/reporting. Drag dividers to
@@ -73,4 +81,4 @@ terminal lock per event; ordinary single-pane event batching is preserved.
 
 Linux tests and virtual-display functional checks pass. Claude has independently built
 and tested the keyboard and mouse phases on macOS. Final native Mac visual/input checks
-for current changes are tracked in [the Phase 4 report](native-splits-phase4.md).
+for pane zoom are tracked in [the Phase 6 report](native-splits-phase6.md).

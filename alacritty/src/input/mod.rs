@@ -352,6 +352,7 @@ impl<T: EventListener> Execute<T> for Action {
             #[cfg(not(target_os = "macos"))]
             Action::Hide => ctx.window().set_visible(false),
             Action::Minimize => ctx.window().set_minimized(true),
+            Action::TogglePaneZoom => ctx.pane_command(PaneCommand::ToggleZoom),
             Action::SplitVertical => ctx.pane_command(PaneCommand::Split(Orientation::Vertical)),
             Action::SplitHorizontal => {
                 ctx.pane_command(PaneCommand::Split(Orientation::Horizontal))
@@ -1375,6 +1376,7 @@ mod tests {
             window_message_bar_handled: false,
         };
         let cases = [
+            (Action::TogglePaneZoom, PaneCommand::ToggleZoom),
             (Action::SplitVertical, PaneCommand::Split(Orientation::Vertical)),
             (Action::SplitHorizontal, PaneCommand::Split(Orientation::Horizontal)),
             (Action::ClosePane, PaneCommand::Close),
