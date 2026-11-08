@@ -31,8 +31,10 @@ New shells inherit the foreground process's working directory when available. A 
 that will not fit is rejected before starting another shell. Exiting a shell collapses
 its split and resizes its neighbors.
 
-## Keys changed from upstream
+## Keys and defaults changed from upstream
 
+- `window.padding` defaults to `{ x = 6, y = 4 }` (upstream: `{ x = 0, y = 0 }`), so
+  the grid gets a small DPI-scaled gutter. Set it to zero to match upstream.
 - Bare PageUp/PageDown scroll the focused pane's primary screen, including in vi mode.
   Alternate-screen programs still receive them, and search behavior is unchanged.
   Shell history-navigation bindings on these keys are displaced. Bind PageUp/PageDown

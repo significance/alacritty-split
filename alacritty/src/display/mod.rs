@@ -1912,13 +1912,18 @@ fn layout_params(
 mod pane_size_tests {
     use super::*;
 
+    /// The fork defaults `window.padding` to 6x4; these tests measure pane-level padding only.
+    fn unpadded_config() -> UiConfig {
+        toml::from_str("[window]\npadding = { x = 0, y = 0 }").unwrap()
+    }
+
     fn view(width: u32, height: u32, config: &UiConfig) -> PaneView {
         PaneView::new(SizeInfo::new(width as f32, height as f32, 8., 16., 0., 0., false), config)
     }
 
     #[test]
     fn split_padding_is_one_logical_pixel_and_single_pane_padding_is_unchanged() {
-        let config = UiConfig::default();
+        let config = unpadded_config();
         let mut pane = view(800, 600, &config);
         let messages = MessageBuffer::default();
         let search = SearchState::default();
@@ -1990,7 +1995,7 @@ mod pane_size_tests {
 
     #[test]
     fn shared_font_change_resizes_different_rectangles_independently() {
-        let config = UiConfig::default();
+        let config = unpadded_config();
         let first = view(800, 600, &config);
         let second = view(400, 300, &config);
         let messages = MessageBuffer::default();

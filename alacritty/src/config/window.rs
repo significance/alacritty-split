@@ -73,7 +73,8 @@ impl Default for WindowConfig {
             dynamic_title: true,
             blur: Default::default(),
             embed: Default::default(),
-            padding: Default::default(),
+            // Fork default: a small gutter around the grid (upstream is 0x0).
+            padding: Delta { x: 6, y: 4 },
             opacity: Default::default(),
             position: Default::default(),
             identity: Default::default(),
@@ -322,5 +323,19 @@ impl From<WindowLevel> for WinitWindowLevel {
             WindowLevel::Normal => WinitWindowLevel::Normal,
             WindowLevel::AlwaysOnTop => WinitWindowLevel::AlwaysOnTop,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_padding_is_a_small_dpi_scaled_gutter() {
+        let config = WindowConfig::default();
+        assert_eq!(config.padding(1.), (6., 4.));
+        assert_eq!(config.padding(2.), (12., 8.));
+        let parsed: WindowConfig = toml::from_str("padding = { x = 0, y = 0 }").unwrap();
+        assert_eq!(parsed.padding(1.), (0., 0.));
     }
 }

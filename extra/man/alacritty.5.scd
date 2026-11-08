@@ -106,7 +106,7 @@ This section documents the *[window]* table of the configuration file.
 	Blank space added around the window in pixels. This padding is scaled
 	by DPI and the specified value is always added at both opposing sides.
 
-	Default: { x = _0_, y = _0_ }
+	Default: { x = _6_, y = _4_ } (upstream Alacritty uses 0, 0)
 
 *dynamic_padding* = _true_ | _false_
 

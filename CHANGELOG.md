@@ -28,6 +28,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Changed
 
+- Default `window.padding` is now `{ x = 6, y = 4 }` instead of `{ x = 0, y = 0 }`
 - Bare PageUp/PageDown scroll the primary screen outside search; Shift variants remain
 - Vi-mode y/Shift+Y use `Yank` to copy, clear selection and leave vi mode
 - Disable cell-size window resize increments while split; restore for the last pane
